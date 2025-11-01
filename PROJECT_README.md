@@ -1,6 +1,6 @@
-# DOSP Project 4 Part 1 - Reddit Clone
+# DOSP Project 4 Part 1 - Reddit Clone Engine
 
-A Reddit-like social media engine built with Gleam using the Actor Model.
+A distributed Reddit-like social media engine built with Gleam using the Actor Model (OTP).
 
 ## Quick Start
 
@@ -11,65 +11,88 @@ gleam deps download
 # Build the project  
 gleam build
 
-# Run the simulation (100 users, 20 subreddits)
+# Run the simulation (100 users, 20 subreddit actors, 5000 operations)
 gleam run
-
-# Run tests
-gleam test
 ```
 
 ## What This Project Does
 
-This project implements a Reddit-like engine with:
-- User registration and karma tracking
-- Subreddit creation and membership
-- Posts with upvote/downvote
-- Hierarchical comments
-- Direct messaging
-- Feed generation
+This project implements a **distributed Reddit clone engine** with multiple independent actors:
 
-Plus a simulator that:
-- Creates hundreds of concurrent users
-- Simulates realistic social network behavior with Zipf distribution
-- Generates random posts, votes, and subscriptions
-- Reports performance metrics
+### Core Features
+- **User registration** with karma tracking
+- **Subreddit creation** (dynamic actor spawning)
+- **Post creation** with upvote/downvote
+- **Hierarchical comment system** (comment on comments)
+- **Direct messaging** between users
+- **Personalized feed** generation
 
-## 架构 (Architecture)
+### Realistic Simulator
+- **100 concurrent client actors**
+- **True Zipf distribution** (popular subreddits get more traffic)
+- **Disconnect/reconnect** simulation (5% users go offline)
+- **Reposting** from hot posts pool (15% of posts)
+- **Realistic voting** (users vote from feed, not blind)
 
-### 分布式多Actor设计
+## Architecture: Distributed Multi-Actor Design
 
-**核心理念**：实现一个"单一引擎服务" (Single-Engine Service)，对外提供统一接口，内部通过多个独立Actor实现真正的分布式处理。
+### Understanding "Single-Engine Process"
 
-#### 组件：
-- **Registry Actor** (`registry.gleam`) 
-  - 统一服务入口 (Facade Pattern)
-  - 管理用户注册和全局路由
-  - 动态创建 Subreddit Actors
-  
-- **Subreddit Actors** (`subreddit_actor.gleam`)
-  - 每个 Subreddit 一个独立 Actor
-  - 完全隔离，无共享状态
-  - 并行处理帖子/评论/投票
-  
-- **Client Actors** (`simulator.gleam`)
-  - 100 个并发客户端
-  - 模拟真实用户行为
-  - Zipf 分布 + 断线重连 + 转发
+The assignment suggests "a single-engine process." **Our interpretation**: A unified service interface (logical single engine), not a literal single Actor.
 
-- **Types** (`types.gleam`)
-  - 消息类型定义
-  - 不可变数据结构
+### Core Components
 
-**关键优势**：Registry 只负责路由，不处理内容逻辑 → 避免单点瓶颈
+#### 1. Registry Actor - Unified Entry Point
+**File**: `registry.gleam` (235 lines)
 
-## 文件结构
+- Acts as the **sole external interface** for the entire Reddit engine
+- Manages global user registration
+- **Dynamically creates** Subreddit Actors on demand
+- Routes requests to appropriate Subreddit Actors
+- Handles direct messages between users
 
-- `src/types.gleam` - 核心数据类型和消息定义
-- `src/registry.gleam` - Registry Actor（统一入口）
-- `src/subreddit_actor.gleam` - Subreddit Actor（独立引擎）
-- `src/simulator.gleam` - 客户端模拟器（Zipf分布，真实行为）
-- `src/dosp_project_4_part1.gleam` - 主入口
-- `REPORT.md` - 详细技术报告
+#### 2. Subreddit Actors - Independent Content Engines  
+**File**: `subreddit_actor.gleam` (285 lines per actor)
+
+- **ONE independent Actor per Subreddit** (complete isolation)
+- Handles posts, comments, votes within that subreddit
+- **No shared state** between Subreddit Actors
+- True parallel processing (20 actors = 20 concurrent processes)
+
+#### 3. Client Actors - User Simulation
+**File**: `simulator.gleam` (739 lines)
+
+- 100 concurrent client actors
+- Each performs 50 independent actions
+- Realistic patterns: Zipf distribution, disconnects, reposts, realistic voting
+
+#### 4. Type System - Message Definitions
+**File**: `types.gleam` (230 lines)
+
+- Type-safe message passing
+- Immutable data structures
+- `RegistryMessage` (14 types) + `SubredditMessage` (11 types)
+
+### Why Multiple Actors?
+
+✅ **True Distribution**: Registry doesn't process posts, each Subreddit Actor operates independently  
+✅ **Fault Isolation**: One subreddit failure doesn't affect others  
+✅ **Horizontal Scalability**: N subreddits = N concurrent actors  
+✅ **No Bottleneck**: Registry only routes, doesn't process content  
+✅ **Satisfies "Single Engine"**: From client perspective, there's only one unified service  
+
+## File Structure
+
+```
+src/
+├── types.gleam              # Data types and message definitions (230 lines)
+├── registry.gleam           # Registry Actor - unified entry point (235 lines)  
+├── subreddit_actor.gleam    # Subreddit Actor - independent engine (285 lines)
+├── simulator.gleam          # Client simulator with realistic behavior (739 lines)
+└── dosp_project_4_part1.gleam  # Main entry point (55 lines)
+```
+
+**Total**: ~1,544 lines of production code
 
 ## Configuration
 
@@ -77,82 +100,92 @@ Edit `src/dosp_project_4_part1.gleam` to change simulation parameters:
 
 ```gleam
 let config = SimulationConfig(
-  num_clients: 100,        // Number of users
-  num_subreddits: 20,      // Number of subreddits
-  num_posts_per_user: 5,   // Actions per user
-  zipf_param: 1.5,         // Zipf distribution (1.0-2.0)
-  simulation_duration_ms: 5000,
+  num_clients: 100,              // Number of concurrent client actors
+  num_subreddits: 20,            // Number of Subreddit Actors (each independent)
+  num_posts_per_user: 50,        // Actions per client
+  zipf_param: 1.5,               // Zipf distribution (higher = more skewed)
+  simulation_duration_ms: 30_000, // 30 seconds
 )
 ```
 
-## Test with More Users
+### Test with Larger Scale
 
 ```gleam
 let config = SimulationConfig(
-  num_clients: 1000,       // 1000 users!
-  num_subreddits: 100,
-  num_posts_per_user: 10,
+  num_clients: 1000,       // 1000 concurrent users
+  num_subreddits: 100,     // 100 independent Subreddit Actors
+  num_posts_per_user: 50,
   zipf_param: 2.0,
-  simulation_duration_ms: 10000,
+  simulation_duration_ms: 60_000,
 )
 ```
 
-## Sample Output
+## Expected Output
 
 ```
 === Reddit Clone - Distributed Systems Project ===
+=== Multi-Actor Distributed Architecture ===
 
-Starting Reddit Engine...
-Engine started successfully!
+Starting Registry Actor...
+Registry started successfully!
+Ready to spawn Subreddit Actors...
 
-=== Starting Reddit Clone Simulation ===
-Clients: 100
-Subreddits: 20
-Duration: 5000 ms
+⚡ DISTRIBUTED ACTOR SYSTEM ⚡
+Clients: 100 | Subreddit Actors: 20 | Total Actions: 5,000
+Architecture: Registry + Multiple Subreddit Actors
 
 Creating subreddits...
-Created 20 subreddits
+Created 20 subreddits (20 independent Actors)
 
 Registering users and starting clients...
 Started 100 client actors
 
-Running simulation...
-Simulation complete!
+Running distributed simulation...
+Processing actions across distributed actors...
 
-=== Final Statistics ===
-Total Users: 101
-Online Users: 101
-Total Subreddits: 20
-Total Posts: 150+
-Total Comments: 50+
-Total Messages: 30+
-Actions/second: 100.0
+=== 🎯 Performance Statistics 🎯 ===
+
+📊 System Metrics:
+  Total Users: 101
+  Online Users: 97
+  Total Subreddits (Actors): 20
+  Total Messages: [count]
+
+⚡ Performance Metrics:
+  Total Operations: 5000
+  Elapsed Time: [time] ms
+  Operations/second: [ops/sec]
+
+🚀 Distributed System Efficiency:
+  Concurrent Actors: 21 (1 Registry + 20 Subreddits)
+  Average ops/actor/sec: [calculated]
 
 === Simulation Complete ===
 ```
 
 ## Requirements Met
 
-✅ Actor Model implementation  
-✅ Separate engine and client processes  
-✅ User registration  
-✅ Subreddit create/join/leave  
-✅ Posts with text content  
-✅ Hierarchical comments  
-✅ Upvote/downvote + karma  
-✅ Feed generation  
-✅ Direct messaging  
-✅ Zipf distribution for members  
-✅ Multiple concurrent clients  
-✅ Online/offline simulation  
-✅ Performance metrics  
+✅ **Register account** - User registration with karma  
+✅ **Create & join sub-reddit** - Dynamic subreddit creation  
+✅ **Post in sub-reddit** - Text post creation  
+✅ **Comment in sub-reddit** - Hierarchical comments  
+✅ **Upvote+downvote + karma** - Vote system with karma calculation  
+✅ **Get feed of posts** - Personalized feed  
+✅ **Direct messaging** - Send and reply to messages  
+✅ **Tester/simulator** - Realistic client simulator  
+✅ **Zipf distribution** - True Zipf implementation  
+✅ **Online/offline** - Disconnect/reconnect simulation  
 
 ## Technologies
 
-- **Gleam** - Type-safe functional language
-- **Erlang/OTP** - Actor model runtime
-- **BEAM VM** - Concurrent execution
+- **Gleam v1.0+** - Type-safe functional language
+- **Erlang/OTP** - Actor model runtime with supervision trees
+- **BEAM VM** - Concurrent execution with millions of lightweight processes
 
-## Report
+## Detailed Documentation
 
-See `REPORT.md` for detailed implementation documentation.
+See **`REPORT.md`** for comprehensive technical documentation including:
+- Detailed architecture explanation
+- Message flow diagrams
+- Performance analysis
+- Design decisions and rationale

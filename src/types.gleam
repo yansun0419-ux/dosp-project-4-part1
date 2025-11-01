@@ -116,20 +116,6 @@ pub type SubredditState {
   )
 }
 
-// Legacy EngineState - Kept for backward compatibility with tests
-pub type EngineState {
-  EngineState(
-    users: Dict(UserId, User),
-    subreddits: Dict(SubredditName, Subreddit),
-    posts: Dict(PostId, Post),
-    comments: Dict(CommentId, Comment),
-    messages: Dict(MessageId, DirectMessage),
-    next_post_id: Int,
-    next_comment_id: Int,
-    next_message_id: Int,
-  )
-}
-
 // ========== Distributed Message Types ==========
 
 // Registry Actor Messages - Global operations handled by the central registry
