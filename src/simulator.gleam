@@ -19,6 +19,10 @@ pub type ClientMessage {
   GoOffline
   GoOnline
   Shutdown
+  UpdateFeed(posts: List(String))
+  // Update known posts from feed
+  AddHotPost(title: String, content: String, subreddit: String)
+  // Add a hot post for potential reposting
 }
 
 // Client state
@@ -29,7 +33,16 @@ pub type ClientState {
     engine: Subject(EngineMessage),
     action_count: Int,
     is_online: Bool,
+    known_posts: List(String),
+    // Track posts from feed for realistic voting
+    hot_posts: List(HotPost),
+    // Track hot posts for re-posting
   )
+}
+
+// Hot post for re-posting
+pub type HotPost {
+  HotPost(title: String, content: String, subreddit: String)
 }
 
 // Simulation configuration
@@ -75,15 +88,36 @@ fn harmonic_number(n: Int, s: Float) -> Result(Float, Nil) {
 }
 
 // Select a random element from list weighted by Zipf distribution
-pub fn select_by_zipf(items: List(a), _zipf_s: Float) -> Result(a, Nil) {
+pub fn select_by_zipf(items: List(a), zipf_s: Float) -> Result(a, Nil) {
   let n = list.length(items)
   case n {
     0 -> Error(Nil)
     _ -> {
-      // Generate random rank (1 to n)
-      // Simplified: just use modulo for demo
-      let rank = int.random(n) + 1
-      list.drop(items, rank - 1)
+      // Calculate cumulative probabilities for each rank
+      let probabilities =
+        list.range(1, n)
+        |> list.map(fn(rank) { zipf_rank(rank, zipf_s, n) })
+
+      // Calculate cumulative sum
+      let cumulative =
+        probabilities
+        |> list.scan(0.0, fn(acc, p) { acc +. p })
+
+      // Generate random number between 0 and 1
+      let random_val = int.to_float(int.random(10_000)) /. 10_000.0
+
+      // Find the rank that corresponds to this random value
+      let selected_rank =
+        cumulative
+        |> list.index_fold(1, fn(selected, cum_prob, idx) {
+          case random_val <. cum_prob, selected == 1 {
+            True, True -> idx + 1
+            _, _ -> selected
+          }
+        })
+
+      // Return the item at the selected rank
+      list.drop(items, selected_rank - 1)
       |> list.first
     }
   }
@@ -102,8 +136,8 @@ fn handle_client_message(
           let action = int.random(100)
 
           case action {
-            // 30% - Create/join subreddit
-            n if n < 30 -> {
+            // 25% - Create/join subreddit
+            n if n < 25 -> {
               let subreddit_name = "sub_" <> string.inspect(int.random(50))
               process.send(
                 state.engine,
@@ -114,34 +148,127 @@ fn handle_client_message(
                 ),
               )
             }
-            // 40% - Create post
-            n if n < 70 -> {
+            // 35% - Create post or re-post
+            n if n < 60 -> {
               let subreddit_name = "sub_" <> string.inspect(int.random(50))
-              process.send(
-                state.engine,
-                CreatePost(
-                  author: state.user_id,
-                  subreddit: subreddit_name,
-                  title: "Post " <> string.inspect(state.action_count),
-                  content: "Content from " <> state.username,
-                  reply: process.new_subject(),
-                ),
-              )
+
+              // 15% chance to repost if we have hot posts
+              let is_repost =
+                int.random(100) < 15 && list.length(state.hot_posts) > 0
+
+              case is_repost {
+                True -> {
+                  // Re-post from hot posts
+                  case
+                    list.drop(state.hot_posts, int.random(list.length(
+                      state.hot_posts,
+                    )))
+                    |> list.first
+                  {
+                    Ok(hot_post) -> {
+                      process.send(
+                        state.engine,
+                        CreatePost(
+                          author: state.user_id,
+                          subreddit: hot_post.subreddit,
+                          title: "Re: " <> hot_post.title,
+                          content: hot_post.content,
+                          reply: process.new_subject(),
+                        ),
+                      )
+                    }
+                    Error(_) -> {
+                      // Fallback to new post
+                      process.send(
+                        state.engine,
+                        CreatePost(
+                          author: state.user_id,
+                          subreddit: subreddit_name,
+                          title: "Post " <> string.inspect(state.action_count),
+                          content: "Content from " <> state.username,
+                          reply: process.new_subject(),
+                        ),
+                      )
+                    }
+                  }
+                }
+                False -> {
+                  // Create new post
+                  let post_reply = process.new_subject()
+                  process.send(
+                    state.engine,
+                    CreatePost(
+                      author: state.user_id,
+                      subreddit: subreddit_name,
+                      title: "Post " <> string.inspect(state.action_count),
+                      content: "Content from " <> state.username,
+                      reply: post_reply,
+                    ),
+                  )
+
+                  // Try to add this to hot posts (20% chance for popular users)
+                  case int.random(100) < 20 {
+                    True -> {
+                      let hot_post =
+                        HotPost(
+                          title: "Post " <> string.inspect(state.action_count),
+                          content: "Content from " <> state.username,
+                          subreddit: subreddit_name,
+                        )
+                      let new_hot_posts = [hot_post, ..state.hot_posts]
+                      // Keep only latest 20 hot posts
+                      let limited_hot_posts = case list.length(new_hot_posts) {
+                        n if n > 20 -> list.take(new_hot_posts, 20)
+                        _ -> new_hot_posts
+                      }
+                      actor.continue(ClientState(
+                        ..state,
+                        action_count: state.action_count + 1,
+                        hot_posts: limited_hot_posts,
+                      ))
+                    }
+                    False -> {
+                      actor.continue(ClientState(
+                        ..state,
+                        action_count: state.action_count + 1,
+                      ))
+                    }
+                  }
+                }
+              }
             }
-            // 20% - Vote on post
-            n if n < 90 -> {
-              let post_id = "post_" <> string.inspect(int.random(100))
-              process.send(
-                state.engine,
-                VotePost(
-                  post_id: post_id,
-                  user_id: state.user_id,
-                  is_upvote: int.random(2) == 1,
-                  reply: process.new_subject(),
-                ),
-              )
+            // 20% - Vote on post (use real post from feed)
+            n if n < 80 -> {
+              case list.length(state.known_posts) {
+                0 -> {
+                  // No known posts, get feed first
+                  process.send(
+                    state.engine,
+                    GetFeed(user_id: state.user_id, reply: process.new_subject()),
+                  )
+                }
+                n -> {
+                  // Vote on a known post
+                  case
+                    list.drop(state.known_posts, int.random(n)) |> list.first
+                  {
+                    Ok(post_id) -> {
+                      process.send(
+                        state.engine,
+                        VotePost(
+                          post_id: post_id,
+                          user_id: state.user_id,
+                          is_upvote: int.random(2) == 1,
+                          reply: process.new_subject(),
+                        ),
+                      )
+                    }
+                    Error(_) -> Nil
+                  }
+                }
+              }
             }
-            // 10% - Get feed
+            // 20% - Get feed to update known posts
             _ -> {
               process.send(
                 state.engine,
@@ -156,6 +283,22 @@ fn handle_client_message(
         }
         False -> actor.continue(state)
       }
+    }
+
+    UpdateFeed(posts) -> {
+      // Update known posts for realistic voting
+      actor.continue(ClientState(..state, known_posts: posts))
+    }
+
+    AddHotPost(title, content, subreddit) -> {
+      let hot_post = HotPost(title: title, content: content, subreddit: subreddit)
+      let new_hot_posts = [hot_post, ..state.hot_posts]
+      // Keep only latest 20 hot posts
+      let limited_hot_posts = case list.length(new_hot_posts) {
+        n if n > 20 -> list.take(new_hot_posts, 20)
+        _ -> new_hot_posts
+      }
+      actor.continue(ClientState(..state, hot_posts: limited_hot_posts))
     }
 
     GoOffline -> {
@@ -201,6 +344,8 @@ pub fn start_client(
       engine: engine,
       action_count: 0,
       is_online: True,
+      known_posts: [],
+      hot_posts: [],
     )
 
   actor.new(state)
@@ -346,7 +491,7 @@ pub fn run_simulation(
   let num_actions = config.num_clients * config.num_posts_per_user
 
   list.range(1, num_actions)
-  |> list.each(fn(_i) {
+  |> list.each(fn(i) {
     // Pick a random client
     case list.length(clients) {
       0 -> Nil
@@ -357,6 +502,39 @@ pub fn run_simulation(
             process.send(client, PerformAction)
           }
           Error(_) -> Nil
+        }
+
+        // Simulate disconnection/reconnection every 100 actions
+        // About 5% of users go offline, then come back online
+        case i % 100 {
+          0 -> {
+            let num_to_disconnect = n / 20
+            // 5% of clients
+
+            // Disconnect some clients
+            list.range(1, num_to_disconnect)
+            |> list.each(fn(_) {
+              let disconnect_idx = int.random(n)
+              case list.drop(clients, disconnect_idx) |> list.first {
+                Ok(client) -> process.send(client, GoOffline)
+                Error(_) -> Nil
+              }
+            })
+          }
+          50 -> {
+            // Reconnect them halfway through the cycle
+            let num_to_reconnect = n / 20
+
+            list.range(1, num_to_reconnect)
+            |> list.each(fn(_) {
+              let reconnect_idx = int.random(n)
+              case list.drop(clients, reconnect_idx) |> list.first {
+                Ok(client) -> process.send(client, GoOnline)
+                Error(_) -> Nil
+              }
+            })
+          }
+          _ -> Nil
         }
 
         // Small delay to simulate real usage
