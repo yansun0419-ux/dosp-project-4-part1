@@ -18,24 +18,25 @@ pub fn main() -> Nil {
       io.println("Ready to spawn Subreddit Actors...")
       io.println("")
 
-      // Configure simulation for MASSIVE scale
+      // Configure simulation for distributed testing
+      // Note: Actors run concurrently, but each action is processed sequentially
       let config =
         SimulationConfig(
-          num_clients: 10_000,
-          // Simulate 10,000 concurrent users
-          num_subreddits: 100,
-          // Create 100 subreddits (100 independent Actors!)
-          num_posts_per_user: 100,
-          // Each user makes 100 actions
+          num_clients: 100,
+          // 100 concurrent client actors
+          num_subreddits: 20,
+          // 20 subreddit actors (fully distributed)
+          num_posts_per_user: 50,
+          // Each client performs 50 actions
           zipf_param: 1.5,
-          // Zipf distribution parameter
-          simulation_duration_ms: 60_000,
-          // 60 second simulation
+          // Zipf distribution parameter (realistic social media pattern)
+          simulation_duration_ms: 30_000,
+          // 30 second simulation window
         )
 
-      io.println("⚡ HIGH-PERFORMANCE MODE ⚡")
-      io.println("Users: 10,000 | Subreddits: 100 | Actions: 1,000,000")
-      io.println("This will generate approximately 1 MILLION operations!")
+      io.println("⚡ DISTRIBUTED ACTOR SYSTEM ⚡")
+      io.println("Clients: 100 | Subreddit Actors: 20 | Total Actions: 5,000")
+      io.println("Architecture: Registry + Multiple Subreddit Actors")
       io.println("")
 
       // Run simulation with distributed architecture

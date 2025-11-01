@@ -34,22 +34,42 @@ Plus a simulator that:
 - Generates random posts, votes, and subscriptions
 - Reports performance metrics
 
-## Architecture
+## 架构 (Architecture)
 
-Built using the **Actor Model** with Gleam's OTP:
-- **Single Engine Actor**: Manages all Reddit state
-- **Multiple Client Actors**: Simulate independent users
-- **Message Passing**: All communication via typed messages
-- **No Shared State**: Pure functional, immutable data
+### 分布式多Actor设计
 
-## Files
+**核心理念**：实现一个"单一引擎服务" (Single-Engine Service)，对外提供统一接口，内部通过多个独立Actor实现真正的分布式处理。
 
-- `src/types.gleam` - Core data types
-- `src/engine.gleam` - Reddit engine actor (600+ lines)
-- `src/simulator.gleam` - Client simulator with Zipf distribution
-- `src/dosp_project_4_part1.gleam` - Main entry point
-- `test/dosp_project_4_part1_test.gleam` - Test suite
-- `REPORT.md` - Detailed documentation
+#### 组件：
+- **Registry Actor** (`registry.gleam`) 
+  - 统一服务入口 (Facade Pattern)
+  - 管理用户注册和全局路由
+  - 动态创建 Subreddit Actors
+  
+- **Subreddit Actors** (`subreddit_actor.gleam`)
+  - 每个 Subreddit 一个独立 Actor
+  - 完全隔离，无共享状态
+  - 并行处理帖子/评论/投票
+  
+- **Client Actors** (`simulator.gleam`)
+  - 100 个并发客户端
+  - 模拟真实用户行为
+  - Zipf 分布 + 断线重连 + 转发
+
+- **Types** (`types.gleam`)
+  - 消息类型定义
+  - 不可变数据结构
+
+**关键优势**：Registry 只负责路由，不处理内容逻辑 → 避免单点瓶颈
+
+## 文件结构
+
+- `src/types.gleam` - 核心数据类型和消息定义
+- `src/registry.gleam` - Registry Actor（统一入口）
+- `src/subreddit_actor.gleam` - Subreddit Actor（独立引擎）
+- `src/simulator.gleam` - 客户端模拟器（Zipf分布，真实行为）
+- `src/dosp_project_4_part1.gleam` - 主入口
+- `REPORT.md` - 详细技术报告
 
 ## Configuration
 

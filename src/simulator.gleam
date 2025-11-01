@@ -596,61 +596,58 @@ pub fn run_simulation(
   )
   io.println("")
 
-  // Run simulation - send actions to clients
-  io.println("Running simulation...")
-  let num_actions = config.num_clients * config.num_posts_per_user
+  // Run simulation - send ALL actions to clients concurrently
+  // Each client actor will process its actions independently
+  io.println("Running distributed simulation...")
+  io.println(
+    "Sending "
+    <> string.inspect(config.num_posts_per_user)
+    <> " actions to each of "
+    <> string.inspect(list.length(clients))
+    <> " clients...",
+  )
 
-  list.range(1, num_actions)
-  |> list.each(fn(i) {
-    // Pick a random client
-    case list.length(clients) {
-      0 -> Nil
-      n -> {
-        let client_idx = int.random(n)
-        case list.drop(clients, client_idx) |> list.first {
-          Ok(client) -> {
-            process.send(client, PerformAction)
-          }
+  // Send all actions to all clients - they'll run in parallel!
+  clients
+  |> list.each(fn(client) {
+    list.range(1, config.num_posts_per_user)
+    |> list.each(fn(_) { process.send(client, PerformAction) })
+  })
+
+  // Simulate disconnection/reconnection
+  let num_clients = list.length(clients)
+  case num_clients {
+    0 -> Nil
+    n -> {
+      // Disconnect 5% of clients
+      let num_to_disconnect = n / 20
+      list.range(1, num_to_disconnect)
+      |> list.each(fn(_) {
+        let disconnect_idx = int.random(n)
+        case list.drop(clients, disconnect_idx) |> list.first {
+          Ok(client) -> process.send(client, GoOffline)
           Error(_) -> Nil
         }
+      })
 
-        // Simulate disconnection/reconnection every 100 actions
-        // About 5% of users go offline, then come back online
-        case i % 100 {
-          0 -> {
-            let num_to_disconnect = n / 20
+      // Wait a bit
+      process.sleep(500)
 
-            // Disconnect some clients
-            list.range(1, num_to_disconnect)
-            |> list.each(fn(_) {
-              let disconnect_idx = int.random(n)
-              case list.drop(clients, disconnect_idx) |> list.first {
-                Ok(client) -> process.send(client, GoOffline)
-                Error(_) -> Nil
-              }
-            })
-          }
-          50 -> {
-            // Reconnect them halfway through the cycle
-            let num_to_reconnect = n / 20
-
-            list.range(1, num_to_reconnect)
-            |> list.each(fn(_) {
-              let reconnect_idx = int.random(n)
-              case list.drop(clients, reconnect_idx) |> list.first {
-                Ok(client) -> process.send(client, GoOnline)
-                Error(_) -> Nil
-              }
-            })
-          }
-          _ -> Nil
+      // Reconnect them
+      list.range(1, num_to_disconnect)
+      |> list.each(fn(_) {
+        let reconnect_idx = int.random(n)
+        case list.drop(clients, reconnect_idx) |> list.first {
+          Ok(client) -> process.send(client, GoOnline)
+          Error(_) -> Nil
         }
-
-        // Small delay to simulate real usage
-        process.sleep(5)
-      }
+      })
     }
-  })
+  }
+
+  // Give actors time to process (they're running concurrently!)
+  io.println("Processing actions across distributed actors...")
+  process.sleep(config.simulation_duration_ms)
 
   io.println("")
   io.println("Simulation complete!")
@@ -659,6 +656,7 @@ pub fn run_simulation(
   // Calculate elapsed time (in milliseconds)
   let end_time = monotonic_time(1_000_000)
   let elapsed_ms = end_time - start_time
+  let num_actions = config.num_clients * config.num_posts_per_user
 
   // Get final statistics from registry
   let stats_reply = process.new_subject()
