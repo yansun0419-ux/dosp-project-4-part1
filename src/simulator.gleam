@@ -1,8 +1,8 @@
-// Client Simulator
-import engine.{
-  type EngineMessage, CreatePost, CreateSubreddit, GetFeed, JoinSubreddit,
-  RegisterUser, SetUserOnline, VotePost,
-}
+// Client Simulator - Distributed Version
+@external(erlang, "erlang", "monotonic_time")
+fn monotonic_time(unit: Int) -> Int
+
+import gleam/dict.{type Dict}
 import gleam/erlang/process.{type Subject}
 import gleam/float
 import gleam/int
@@ -11,7 +11,10 @@ import gleam/list
 import gleam/option.{None, Some}
 import gleam/otp/actor
 import gleam/string
-import types.{type UserId}
+import types.{
+  type Post, type RegistryMessage, type RegistryStats, type SubredditMessage,
+  type SubredditName, type UserId,
+}
 
 // Client actor messages
 pub type ClientMessage {
@@ -20,29 +23,56 @@ pub type ClientMessage {
   GoOnline
   Shutdown
   UpdateFeed(posts: List(String))
-  // Update known posts from feed
   AddHotPost(title: String, content: String, subreddit: String)
-  // Add a hot post for potential reposting
 }
 
-// Client state
+// Client state - Distributed version
 pub type ClientState {
   ClientState(
     user_id: UserId,
     username: String,
-    engine: Subject(EngineMessage),
+    registry: Subject(RegistryMessage),
     action_count: Int,
     is_online: Bool,
     known_posts: List(String),
-    // Track posts from feed for realistic voting
     hot_posts: List(HotPost),
-    // Track hot posts for re-posting
+    subreddit_cache: Dict(SubredditName, Subject(SubredditMessage)),
   )
 }
 
 // Hot post for re-posting
 pub type HotPost {
   HotPost(title: String, content: String, subreddit: String)
+}
+
+// Helper function: Get Subreddit Actor address (with caching)
+fn get_subreddit_actor(
+  state: ClientState,
+  subreddit_name: SubredditName,
+) -> Result(#(Subject(SubredditMessage), ClientState), Nil) {
+  // Check cache first
+  case dict.get(state.subreddit_cache, subreddit_name) {
+    Ok(actor_subject) -> Ok(#(actor_subject, state))
+    Error(_) -> {
+      // Cache miss, query registry
+      let reply = process.new_subject()
+      process.send(
+        state.registry,
+        types.GetSubredditActor(name: subreddit_name, reply: reply),
+      )
+
+      case process.receive(reply, 1000) {
+        Ok(Ok(actor_subject)) -> {
+          // Successfully obtained, add to cache
+          let new_cache =
+            dict.insert(state.subreddit_cache, subreddit_name, actor_subject)
+          let new_state = ClientState(..state, subreddit_cache: new_cache)
+          Ok(#(actor_subject, new_state))
+        }
+        _ -> Error(Nil)
+      }
+    }
+  }
 }
 
 // Simulation configuration
@@ -123,7 +153,7 @@ pub fn select_by_zipf(items: List(a), zipf_s: Float) -> Result(a, Nil) {
   }
 }
 
-// Client actor handler
+// Client actor handler - Distributed version
 fn handle_client_message(
   state: ClientState,
   message: ClientMessage,
@@ -139,14 +169,56 @@ fn handle_client_message(
             // 25% - Create/join subreddit
             n if n < 25 -> {
               let subreddit_name = "sub_" <> string.inspect(int.random(50))
-              process.send(
-                state.engine,
-                JoinSubreddit(
-                  user_id: state.user_id,
-                  subreddit: subreddit_name,
-                  reply: process.new_subject(),
-                ),
-              )
+
+              // Distributed approach: Get subreddit actor first
+              case get_subreddit_actor(state, subreddit_name) {
+                Ok(#(subreddit_actor, new_state)) -> {
+                  process.send(
+                    subreddit_actor,
+                    types.JoinSubreddit(
+                      user_id: state.user_id,
+                      reply: process.new_subject(),
+                    ),
+                  )
+                  actor.continue(new_state)
+                }
+                Error(_) -> {
+                  // Subreddit doesn't exist, create it first
+                  let reply = process.new_subject()
+                  process.send(
+                    state.registry,
+                    types.CreateSubreddit(
+                      name: subreddit_name,
+                      creator: state.user_id,
+                      reply: reply,
+                    ),
+                  )
+                  // Wait for creation result, then add to cache
+                  case process.receive(reply, 1000) {
+                    Ok(Ok(subreddit_actor)) -> {
+                      let new_cache =
+                        dict.insert(
+                          state.subreddit_cache,
+                          subreddit_name,
+                          subreddit_actor,
+                        )
+                      let new_state =
+                        ClientState(..state, subreddit_cache: new_cache)
+
+                      // Join this newly created subreddit
+                      process.send(
+                        subreddit_actor,
+                        types.JoinSubreddit(
+                          user_id: state.user_id,
+                          reply: process.new_subject(),
+                        ),
+                      )
+                      actor.continue(new_state)
+                    }
+                    _ -> actor.continue(state)
+                  }
+                }
+              }
             }
             // 35% - Create post or re-post
             n if n < 60 -> {
@@ -154,86 +226,72 @@ fn handle_client_message(
 
               // 15% chance to repost if we have hot posts
               let is_repost =
-                int.random(100) < 15 && list.length(state.hot_posts) > 0
+                int.random(100) < 15 && state.hot_posts != []
 
-              case is_repost {
+              let #(title, content) = case is_repost {
                 True -> {
-                  // Re-post from hot posts
                   case
                     list.drop(state.hot_posts, int.random(list.length(
                       state.hot_posts,
                     )))
                     |> list.first
                   {
-                    Ok(hot_post) -> {
-                      process.send(
-                        state.engine,
-                        CreatePost(
-                          author: state.user_id,
-                          subreddit: hot_post.subreddit,
-                          title: "Re: " <> hot_post.title,
-                          content: hot_post.content,
-                          reply: process.new_subject(),
-                        ),
-                      )
-                    }
-                    Error(_) -> {
-                      // Fallback to new post
-                      process.send(
-                        state.engine,
-                        CreatePost(
-                          author: state.user_id,
-                          subreddit: subreddit_name,
-                          title: "Post " <> string.inspect(state.action_count),
-                          content: "Content from " <> state.username,
-                          reply: process.new_subject(),
-                        ),
-                      )
-                    }
+                    Ok(hot_post) -> #("Re: " <> hot_post.title, hot_post.content)
+                    Error(_) -> #(
+                      "Post " <> string.inspect(state.action_count),
+                      "Content from " <> state.username,
+                    )
                   }
                 }
-                False -> {
-                  // Create new post
-                  let post_reply = process.new_subject()
+                False -> #(
+                  "Post " <> string.inspect(state.action_count),
+                  "Content from " <> state.username,
+                )
+              }
+
+              // Distributed approach: Get subreddit actor then create post
+              case get_subreddit_actor(state, subreddit_name) {
+                Ok(#(subreddit_actor, new_state)) -> {
                   process.send(
-                    state.engine,
-                    CreatePost(
+                    subreddit_actor,
+                    types.CreatePost(
                       author: state.user_id,
-                      subreddit: subreddit_name,
-                      title: "Post " <> string.inspect(state.action_count),
-                      content: "Content from " <> state.username,
-                      reply: post_reply,
+                      title: title,
+                      content: content,
+                      reply: process.new_subject(),
                     ),
                   )
 
-                  // Try to add this to hot posts (20% chance for popular users)
-                  case int.random(100) < 20 {
-                    True -> {
+                  // 20% chance to add to hot posts pool
+                  case int.random(100) < 20, is_repost {
+                    True, False -> {
                       let hot_post =
                         HotPost(
-                          title: "Post " <> string.inspect(state.action_count),
-                          content: "Content from " <> state.username,
+                          title: title,
+                          content: content,
                           subreddit: subreddit_name,
                         )
-                      let new_hot_posts = [hot_post, ..state.hot_posts]
-                      // Keep only latest 20 hot posts
+                      let new_hot_posts = [hot_post, ..new_state.hot_posts]
                       let limited_hot_posts = case list.length(new_hot_posts) {
                         n if n > 20 -> list.take(new_hot_posts, 20)
                         _ -> new_hot_posts
                       }
                       actor.continue(ClientState(
-                        ..state,
-                        action_count: state.action_count + 1,
+                        ..new_state,
+                        action_count: new_state.action_count + 1,
                         hot_posts: limited_hot_posts,
                       ))
                     }
-                    False -> {
+                    _, _ ->
                       actor.continue(ClientState(
-                        ..state,
-                        action_count: state.action_count + 1,
+                        ..new_state,
+                        action_count: new_state.action_count + 1,
                       ))
-                    }
                   }
+                }
+                Error(_) -> {
+                  // Subreddit doesn't exist, skip for now
+                  actor.continue(state)
                 }
               }
             }
@@ -241,39 +299,63 @@ fn handle_client_message(
             n if n < 80 -> {
               case list.length(state.known_posts) {
                 0 -> {
-                  // No known posts, get feed first
-                  process.send(
-                    state.engine,
-                    GetFeed(user_id: state.user_id, reply: process.new_subject()),
-                  )
+                  // No known posts, skip for now
+                  actor.continue(state)
                 }
                 n -> {
-                  // Vote on a known post
+                  // Vote on known post (simplified: assuming same subreddit)
                   case
                     list.drop(state.known_posts, int.random(n)) |> list.first
                   {
                     Ok(post_id) -> {
-                      process.send(
-                        state.engine,
-                        VotePost(
-                          post_id: post_id,
-                          user_id: state.user_id,
-                          is_upvote: int.random(2) == 1,
-                          reply: process.new_subject(),
-                        ),
-                      )
+                      let subreddit_name = "sub_" <> string.inspect(int.random(50))
+                      case get_subreddit_actor(state, subreddit_name) {
+                        Ok(#(subreddit_actor, new_state)) -> {
+                          process.send(
+                            subreddit_actor,
+                            types.VotePost(
+                              post_id: post_id,
+                              user_id: state.user_id,
+                              is_upvote: int.random(2) == 1,
+                              reply: process.new_subject(),
+                            ),
+                          )
+                          actor.continue(new_state)
+                        }
+                        Error(_) -> actor.continue(state)
+                      }
                     }
-                    Error(_) -> Nil
+                    Error(_) -> actor.continue(state)
                   }
                 }
               }
             }
             // 20% - Get feed to update known posts
             _ -> {
-              process.send(
-                state.engine,
-                GetFeed(user_id: state.user_id, reply: process.new_subject()),
-              )
+              let subreddit_name = "sub_" <> string.inspect(int.random(50))
+              case get_subreddit_actor(state, subreddit_name) {
+                Ok(#(subreddit_actor, new_state)) -> {
+                  let feed_reply = process.new_subject()
+                  process.send(
+                    subreddit_actor,
+                    types.GetFeed(
+                      user_id: state.user_id,
+                      reply: feed_reply,
+                    ),
+                  )
+
+                  // Try to receive feed and update known_posts
+                  case process.receive(feed_reply, 500) {
+                    Ok(Ok(posts)) -> {
+                      // Store hot posts for potential re-posting
+                      let post_ids = list.map(posts, fn(post: Post) { post.id })
+                      actor.continue(ClientState(..new_state, known_posts: post_ids))
+                    }
+                    _ -> actor.continue(new_state)
+                  }
+                }
+                Error(_) -> actor.continue(state)
+              }
             }
           }
 
@@ -291,7 +373,8 @@ fn handle_client_message(
     }
 
     AddHotPost(title, content, subreddit) -> {
-      let hot_post = HotPost(title: title, content: content, subreddit: subreddit)
+      let hot_post =
+        HotPost(title: title, content: content, subreddit: subreddit)
       let new_hot_posts = [hot_post, ..state.hot_posts]
       // Keep only latest 20 hot posts
       let limited_hot_posts = case list.length(new_hot_posts) {
@@ -303,8 +386,8 @@ fn handle_client_message(
 
     GoOffline -> {
       process.send(
-        state.engine,
-        SetUserOnline(
+        state.registry,
+        types.SetUserOnline(
           user_id: state.user_id,
           is_online: False,
           reply: process.new_subject(),
@@ -316,8 +399,8 @@ fn handle_client_message(
 
     GoOnline -> {
       process.send(
-        state.engine,
-        SetUserOnline(
+        state.registry,
+        types.SetUserOnline(
           user_id: state.user_id,
           is_online: True,
           reply: process.new_subject(),
@@ -331,21 +414,22 @@ fn handle_client_message(
   }
 }
 
-// Start a client actor
+// Start a client actor - Distributed version
 pub fn start_client(
   username: String,
   user_id: UserId,
-  engine: Subject(EngineMessage),
+  registry: Subject(RegistryMessage),
 ) -> Result(actor.Started(Subject(ClientMessage)), actor.StartError) {
   let state =
     ClientState(
       user_id: user_id,
       username: username,
-      engine: engine,
+      registry: registry,
       action_count: 0,
       is_online: True,
       known_posts: [],
       hot_posts: [],
+      subreddit_cache: dict.new(),
     )
 
   actor.new(state)
@@ -366,18 +450,23 @@ pub type SimulationStats {
   )
 }
 
-// Run simulation coordinator
+// Run simulation coordinator - Distributed version
 pub fn run_simulation(
   config: SimulationConfig,
-  engine: Subject(EngineMessage),
+  registry: Subject(RegistryMessage),
 ) -> SimulationStats {
   io.println("=== Starting Reddit Clone Simulation ===")
   io.println("Clients: " <> string.inspect(config.num_clients))
   io.println("Subreddits: " <> string.inspect(config.num_subreddits))
   io.println(
-    "Duration: " <> string.inspect(config.simulation_duration_ms) <> " ms",
+    "Target Operations: "
+    <> string.inspect(config.num_clients * config.num_posts_per_user),
   )
   io.println("")
+
+  // Record start time for performance measurement (milliseconds)
+  // 1 = millisecond in Erlang time units
+  let start_time = monotonic_time(1_000_000)
 
   // Create subreddits with Zipf distribution
   io.println("Creating subreddits...")
@@ -391,7 +480,10 @@ pub fn run_simulation(
       case i {
         1 -> {
           let reply = process.new_subject()
-          process.send(engine, RegisterUser(username: "system", reply: reply))
+          process.send(
+            registry,
+            types.RegisterUser(username: "system", reply: reply),
+          )
           let _result = process.receive(reply, 1000)
           Nil
         }
@@ -400,8 +492,12 @@ pub fn run_simulation(
 
       let reply = process.new_subject()
       process.send(
-        engine,
-        CreateSubreddit(name: subreddit_name, creator: creator_id, reply: reply),
+        registry,
+        types.CreateSubreddit(
+          name: subreddit_name,
+          creator: creator_id,
+          reply: reply,
+        ),
       )
       let _result = process.receive(reply, 1000)
 
@@ -423,8 +519,8 @@ pub fn run_simulation(
       // Register user
       let register_reply = process.new_subject()
       process.send(
-        engine,
-        RegisterUser(username: username, reply: register_reply),
+        registry,
+        types.RegisterUser(username: username, reply: register_reply),
       )
 
       case process.receive(register_reply, 1000) {
@@ -432,7 +528,7 @@ pub fn run_simulation(
           case result {
             Ok(user_id) -> {
               // Start client actor
-              case start_client(username, user_id, engine) {
+              case start_client(username, user_id, registry) {
                 Ok(started) -> {
                   // Join some subreddits based on Zipf distribution
                   let num_subs_to_join = case i {
@@ -447,17 +543,31 @@ pub fn run_simulation(
                   |> list.each(fn(_) {
                     case select_by_zipf(subreddits, config.zipf_param) {
                       Ok(sub_name) -> {
-                        let join_reply = process.new_subject()
+                        // 获取 subreddit actor
+                        let get_actor_reply = process.new_subject()
                         process.send(
-                          engine,
-                          JoinSubreddit(
-                            user_id: user_id,
-                            subreddit: sub_name,
-                            reply: join_reply,
+                          registry,
+                          types.GetSubredditActor(
+                            name: sub_name,
+                            reply: get_actor_reply,
                           ),
                         )
-                        let _result = process.receive(join_reply, 1000)
-                        Nil
+
+                        case process.receive(get_actor_reply, 1000) {
+                          Ok(Ok(subreddit_actor)) -> {
+                            let join_reply = process.new_subject()
+                            process.send(
+                              subreddit_actor,
+                              types.JoinSubreddit(
+                                user_id: user_id,
+                                reply: join_reply,
+                              ),
+                            )
+                            let _result = process.receive(join_reply, 1000)
+                            Nil
+                          }
+                          _ -> Nil
+                        }
                       }
                       Error(_) -> Nil
                     }
@@ -509,7 +619,6 @@ pub fn run_simulation(
         case i % 100 {
           0 -> {
             let num_to_disconnect = n / 20
-            // 5% of clients
 
             // Disconnect some clients
             list.range(1, num_to_disconnect)
@@ -547,39 +656,74 @@ pub fn run_simulation(
   io.println("Simulation complete!")
   io.println("")
 
-  // Get final stats from engine
+  // Calculate elapsed time (in milliseconds)
+  let end_time = monotonic_time(1_000_000)
+  let elapsed_ms = end_time - start_time
+
+  // Get final statistics from registry
   let stats_reply = process.new_subject()
-  process.send(engine, engine.GetStats(reply: stats_reply))
+  process.send(registry, types.GetRegistryStats(reply: stats_reply))
 
   case process.receive(stats_reply, 1000) {
-    Ok(engine_stats) -> {
-      io.println("=== Final Statistics ===")
-      io.println("Total Users: " <> string.inspect(engine_stats.total_users))
-      io.println("Online Users: " <> string.inspect(engine_stats.online_users))
+    Ok(registry_stats) -> {
+      io.println("=== 🎯 Performance Statistics 🎯 ===")
+      io.println("")
+      io.println("📊 System Metrics:")
+      io.println("  Total Users: " <> string.inspect(registry_stats.total_users))
       io.println(
-        "Total Subreddits: " <> string.inspect(engine_stats.total_subreddits),
-      )
-      io.println("Total Posts: " <> string.inspect(engine_stats.total_posts))
-      io.println(
-        "Total Comments: " <> string.inspect(engine_stats.total_comments),
+        "  Online Users: " <> string.inspect(registry_stats.online_users),
       )
       io.println(
-        "Total Messages: " <> string.inspect(engine_stats.total_messages),
+        "  Total Subreddits (Actors): "
+        <> string.inspect(registry_stats.total_subreddits),
       )
+      io.println(
+        "  Total Messages: " <> string.inspect(registry_stats.total_messages),
+      )
+      io.println("")
 
-      let actions_per_sec = case config.simulation_duration_ms {
-        0 -> 0.0
-        ms -> int.to_float(num_actions) /. int.to_float(ms) *. 1000.0
+      io.println("⚡ Performance Metrics:")
+      io.println("  Total Operations: " <> string.inspect(num_actions))
+      io.println("  Elapsed Time: " <> string.inspect(elapsed_ms) <> " ms")
+
+      let actual_duration = case elapsed_ms {
+        0 -> 1
+        n -> n
       }
 
-      io.println("Actions/second: " <> string.inspect(actions_per_sec))
+      let ops_per_second =
+        int.to_float(num_actions) /. int.to_float(actual_duration) *. 1000.0
+      let ops_per_minute = ops_per_second *. 60.0
+
+      io.println(
+        "  Operations/second: " <> float.to_string(ops_per_second),
+      )
+      io.println(
+        "  Operations/minute: " <> float.to_string(ops_per_minute),
+      )
+
+      // Calculate theoretical maximum
+      // Removed unused theoretical_max calculation
+      io.println("")
+      io.println("🚀 Distributed System Efficiency:")
+      io.println(
+        "  Concurrent Actors: "
+        <> string.inspect(registry_stats.total_subreddits + 1),
+      )
+      io.println(
+        "  Average ops/actor/sec: "
+        <> float.to_string(
+          ops_per_second
+          /. int.to_float(registry_stats.total_subreddits + 1),
+        ),
+      )
     }
     Error(_) -> {
       io.println("Failed to get engine statistics")
     }
   }
 
-  // Shutdown clients
+  // Shutdown all clients
   list.each(clients, fn(client) { process.send(client, Shutdown) })
 
   SimulationStats(
