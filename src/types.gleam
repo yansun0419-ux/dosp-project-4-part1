@@ -113,6 +113,7 @@ pub type SubredditState {
     next_post_id: Int,
     next_comment_id: Int,
     created_at: Int,
+    registry: Subject(RegistryMessage),
   )
 }
 
@@ -128,11 +129,13 @@ pub type RegistryMessage {
     is_online: Bool,
     reply: Subject(Result(Nil, String)),
   )
+  UpdateKarma(user_id: UserId, delta: Int)
 
   // Subreddit management
   CreateSubreddit(
     name: SubredditName,
     creator: UserId,
+    registry_subject: Subject(RegistryMessage),
     reply: Subject(Result(Subject(SubredditMessage), String)),
   )
   GetSubredditActor(

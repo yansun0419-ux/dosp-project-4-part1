@@ -74,8 +74,22 @@ fn handle_registry_message(
       }
     }
 
+    types.UpdateKarma(user_id, delta) -> {
+      case dict.get(state.users, user_id) {
+        Ok(user) -> {
+          let updated_user = User(..user, karma: user.karma + delta)
+          let new_users = dict.insert(state.users, user_id, updated_user)
+          actor.continue(RegistryState(..state, users: new_users))
+        }
+        Error(_) -> {
+          // User not found, ignore
+          actor.continue(state)
+        }
+      }
+    }
+
     // ===== Subreddit Management =====
-    types.CreateSubreddit(name, creator, reply) -> {
+    types.CreateSubreddit(name, creator, registry_subject, reply) -> {
       case dict.get(state.subreddit_actors, name) {
         Ok(actor_ref) -> {
           // Subreddit already exists, return existing actor
@@ -84,7 +98,7 @@ fn handle_registry_message(
         }
         Error(_) -> {
           // Create new Subreddit Actor
-          case subreddit_actor.start(name, creator) {
+          case subreddit_actor.start(name, creator, registry_subject) {
             Ok(started) -> {
               let actor_ref =
                 types.SubredditActorRef(name: name, subject: started.data)
@@ -119,8 +133,7 @@ fn handle_registry_message(
       // Check if sender and receiver exist
       case dict.get(state.users, from), dict.get(state.users, to) {
         Ok(_), Ok(_) -> {
-          let message_id =
-            "msg_" <> string.inspect(state.next_message_id)
+          let message_id = "msg_" <> string.inspect(state.next_message_id)
 
           let new_message =
             DirectMessage(
@@ -132,7 +145,8 @@ fn handle_registry_message(
               created_at: 0,
             )
 
-          let new_messages = dict.insert(state.messages, message_id, new_message)
+          let new_messages =
+            dict.insert(state.messages, message_id, new_message)
 
           process.send(reply, Ok(message_id))
           actor.continue(
@@ -174,7 +188,8 @@ fn handle_registry_message(
               created_at: 0,
             )
 
-          let new_messages = dict.insert(state.messages, new_msg_id, new_message)
+          let new_messages =
+            dict.insert(state.messages, new_msg_id, new_message)
 
           process.send(reply, Ok(new_msg_id))
           actor.continue(

@@ -37,6 +37,8 @@ pub type ClientState {
     known_posts: List(String),
     hot_posts: List(HotPost),
     subreddit_cache: Dict(SubredditName, Subject(SubredditMessage)),
+    available_subreddits: List(SubredditName),
+    zipf_param: Float,
   )
 }
 
@@ -190,6 +192,7 @@ fn handle_client_message(
                     types.CreateSubreddit(
                       name: subreddit_name,
                       creator: state.user_id,
+                      registry_subject: state.registry,
                       reply: reply,
                     ),
                   )
@@ -222,21 +225,30 @@ fn handle_client_message(
             }
             // 35% - Create post or re-post
             n if n < 60 -> {
-              let subreddit_name = "sub_" <> string.inspect(int.random(50))
+              // Use Zipf distribution to select subreddit (popular subs get more posts)
+              let subreddit_name = case
+                select_by_zipf(state.available_subreddits, state.zipf_param)
+              {
+                Ok(name) -> name
+                Error(_) -> "sub_1"
+              }
 
               // 15% chance to repost if we have hot posts
-              let is_repost =
-                int.random(100) < 15 && state.hot_posts != []
+              let is_repost = int.random(100) < 15 && state.hot_posts != []
 
               let #(title, content) = case is_repost {
                 True -> {
                   case
-                    list.drop(state.hot_posts, int.random(list.length(
+                    list.drop(
                       state.hot_posts,
-                    )))
+                      int.random(list.length(state.hot_posts)),
+                    )
                     |> list.first
                   {
-                    Ok(hot_post) -> #("Re: " <> hot_post.title, hot_post.content)
+                    Ok(hot_post) -> #(
+                      "Re: " <> hot_post.title,
+                      hot_post.content,
+                    )
                     Error(_) -> #(
                       "Post " <> string.inspect(state.action_count),
                       "Content from " <> state.username,
@@ -276,17 +288,21 @@ fn handle_client_message(
                         n if n > 20 -> list.take(new_hot_posts, 20)
                         _ -> new_hot_posts
                       }
-                      actor.continue(ClientState(
-                        ..new_state,
-                        action_count: new_state.action_count + 1,
-                        hot_posts: limited_hot_posts,
-                      ))
+                      actor.continue(
+                        ClientState(
+                          ..new_state,
+                          action_count: new_state.action_count + 1,
+                          hot_posts: limited_hot_posts,
+                        ),
+                      )
                     }
                     _, _ ->
-                      actor.continue(ClientState(
-                        ..new_state,
-                        action_count: new_state.action_count + 1,
-                      ))
+                      actor.continue(
+                        ClientState(
+                          ..new_state,
+                          action_count: new_state.action_count + 1,
+                        ),
+                      )
                   }
                 }
                 Error(_) -> {
@@ -295,20 +311,82 @@ fn handle_client_message(
                 }
               }
             }
-            // 20% - Vote on post (use real post from feed)
-            n if n < 80 -> {
+            // 15% - Create comment on a post
+            n if n < 75 -> {
               case list.length(state.known_posts) {
                 0 -> {
                   // No known posts, skip for now
                   actor.continue(state)
                 }
                 n -> {
-                  // Vote on known post (simplified: assuming same subreddit)
+                  // Comment on a known post
                   case
                     list.drop(state.known_posts, int.random(n)) |> list.first
                   {
                     Ok(post_id) -> {
-                      let subreddit_name = "sub_" <> string.inspect(int.random(50))
+                      // Use Zipf to select subreddit
+                      let subreddit_name = case
+                        select_by_zipf(
+                          state.available_subreddits,
+                          state.zipf_param,
+                        )
+                      {
+                        Ok(name) -> name
+                        Error(_) -> "sub_1"
+                      }
+
+                      case get_subreddit_actor(state, subreddit_name) {
+                        Ok(#(subreddit_actor, new_state)) -> {
+                          let comment_content =
+                            "Comment from "
+                            <> state.username
+                            <> " on action "
+                            <> string.inspect(state.action_count)
+
+                          process.send(
+                            subreddit_actor,
+                            types.CreateComment(
+                              author: state.user_id,
+                              post_id: post_id,
+                              parent_comment_id: None,
+                              content: comment_content,
+                              reply: process.new_subject(),
+                            ),
+                          )
+                          actor.continue(new_state)
+                        }
+                        Error(_) -> actor.continue(state)
+                      }
+                    }
+                    Error(_) -> actor.continue(state)
+                  }
+                }
+              }
+            }
+            // 10% - Vote on post
+            n if n < 85 -> {
+              case list.length(state.known_posts) {
+                0 -> {
+                  // No known posts, skip for now
+                  actor.continue(state)
+                }
+                n -> {
+                  // Vote on known post
+                  case
+                    list.drop(state.known_posts, int.random(n)) |> list.first
+                  {
+                    Ok(post_id) -> {
+                      // Use Zipf to select subreddit
+                      let subreddit_name = case
+                        select_by_zipf(
+                          state.available_subreddits,
+                          state.zipf_param,
+                        )
+                      {
+                        Ok(name) -> name
+                        Error(_) -> "sub_1"
+                      }
+
                       case get_subreddit_actor(state, subreddit_name) {
                         Ok(#(subreddit_actor, new_state)) -> {
                           process.send(
@@ -330,18 +408,22 @@ fn handle_client_message(
                 }
               }
             }
-            // 20% - Get feed to update known posts
+            // 15% - Get feed to update known posts
             _ -> {
-              let subreddit_name = "sub_" <> string.inspect(int.random(50))
+              // Use Zipf to select subreddit
+              let subreddit_name = case
+                select_by_zipf(state.available_subreddits, state.zipf_param)
+              {
+                Ok(name) -> name
+                Error(_) -> "sub_1"
+              }
+
               case get_subreddit_actor(state, subreddit_name) {
                 Ok(#(subreddit_actor, new_state)) -> {
                   let feed_reply = process.new_subject()
                   process.send(
                     subreddit_actor,
-                    types.GetFeed(
-                      user_id: state.user_id,
-                      reply: feed_reply,
-                    ),
+                    types.GetFeed(user_id: state.user_id, reply: feed_reply),
                   )
 
                   // Try to receive feed and update known_posts
@@ -349,7 +431,9 @@ fn handle_client_message(
                     Ok(Ok(posts)) -> {
                       // Store hot posts for potential re-posting
                       let post_ids = list.map(posts, fn(post: Post) { post.id })
-                      actor.continue(ClientState(..new_state, known_posts: post_ids))
+                      actor.continue(
+                        ClientState(..new_state, known_posts: post_ids),
+                      )
                     }
                     _ -> actor.continue(new_state)
                   }
@@ -419,6 +503,8 @@ pub fn start_client(
   username: String,
   user_id: UserId,
   registry: Subject(RegistryMessage),
+  available_subreddits: List(SubredditName),
+  zipf_param: Float,
 ) -> Result(actor.Started(Subject(ClientMessage)), actor.StartError) {
   let state =
     ClientState(
@@ -430,6 +516,8 @@ pub fn start_client(
       known_posts: [],
       hot_posts: [],
       subreddit_cache: dict.new(),
+      available_subreddits: available_subreddits,
+      zipf_param: zipf_param,
     )
 
   actor.new(state)
@@ -496,6 +584,7 @@ pub fn run_simulation(
         types.CreateSubreddit(
           name: subreddit_name,
           creator: creator_id,
+          registry_subject: registry,
           reply: reply,
         ),
       )
@@ -528,7 +617,15 @@ pub fn run_simulation(
           case result {
             Ok(user_id) -> {
               // Start client actor
-              case start_client(username, user_id, registry) {
+              case
+                start_client(
+                  username,
+                  user_id,
+                  registry,
+                  subreddits,
+                  config.zipf_param,
+                )
+              {
                 Ok(started) -> {
                   // Join some subreddits based on Zipf distribution
                   let num_subs_to_join = case i {
@@ -667,7 +764,9 @@ pub fn run_simulation(
       io.println("=== 🎯 Performance Statistics 🎯 ===")
       io.println("")
       io.println("📊 System Metrics:")
-      io.println("  Total Users: " <> string.inspect(registry_stats.total_users))
+      io.println(
+        "  Total Users: " <> string.inspect(registry_stats.total_users),
+      )
       io.println(
         "  Online Users: " <> string.inspect(registry_stats.online_users),
       )
@@ -693,12 +792,8 @@ pub fn run_simulation(
         int.to_float(num_actions) /. int.to_float(actual_duration) *. 1000.0
       let ops_per_minute = ops_per_second *. 60.0
 
-      io.println(
-        "  Operations/second: " <> float.to_string(ops_per_second),
-      )
-      io.println(
-        "  Operations/minute: " <> float.to_string(ops_per_minute),
-      )
+      io.println("  Operations/second: " <> float.to_string(ops_per_second))
+      io.println("  Operations/minute: " <> float.to_string(ops_per_minute))
 
       // Calculate theoretical maximum
       // Removed unused theoretical_max calculation
@@ -711,8 +806,7 @@ pub fn run_simulation(
       io.println(
         "  Average ops/actor/sec: "
         <> float.to_string(
-          ops_per_second
-          /. int.to_float(registry_stats.total_subreddits + 1),
+          ops_per_second /. int.to_float(registry_stats.total_subreddits + 1),
         ),
       )
     }

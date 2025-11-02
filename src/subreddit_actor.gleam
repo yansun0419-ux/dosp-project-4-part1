@@ -59,8 +59,7 @@ fn handle_subreddit_message(
 
     // ===== Post Operations =====
     types.CreatePost(author, title, content, reply) -> {
-      let post_id =
-        state.name <> "_post_" <> string.inspect(state.next_post_id)
+      let post_id = state.name <> "_post_" <> string.inspect(state.next_post_id)
 
       let new_post =
         Post(
@@ -105,6 +104,16 @@ fn handle_subreddit_message(
 
           let new_posts = dict.insert(state.posts, post_id, updated_post)
 
+          // Update author's karma
+          let karma_delta = case is_upvote {
+            True -> 1
+            False -> -1
+          }
+          process.send(
+            state.registry,
+            types.UpdateKarma(user_id: post.author, delta: karma_delta),
+          )
+
           process.send(reply, Ok(Nil))
           actor.continue(SubredditState(..state, posts: new_posts))
         }
@@ -143,7 +152,8 @@ fn handle_subreddit_message(
               created_at: 0,
             )
 
-          let new_comments = dict.insert(state.comments, comment_id, new_comment)
+          let new_comments =
+            dict.insert(state.comments, comment_id, new_comment)
 
           // Update post's comment list
           let updated_post =
@@ -206,6 +216,16 @@ fn handle_subreddit_message(
           let new_comments =
             dict.insert(state.comments, comment_id, updated_comment)
 
+          // Update author's karma
+          let karma_delta = case is_upvote {
+            True -> 1
+            False -> -1
+          }
+          process.send(
+            state.registry,
+            types.UpdateKarma(user_id: comment.author, delta: karma_delta),
+          )
+
           process.send(reply, Ok(Nil))
           actor.continue(SubredditState(..state, comments: new_comments))
         }
@@ -255,10 +275,8 @@ fn handle_subreddit_message(
 pub fn start(
   name: SubredditName,
   creator: UserId,
-) -> Result(
-  actor.Started(Subject(SubredditMessage)),
-  actor.StartError,
-) {
+  registry: Subject(types.RegistryMessage),
+) -> Result(actor.Started(Subject(SubredditMessage)), actor.StartError) {
   let initial_state =
     SubredditState(
       name: name,
@@ -269,6 +287,7 @@ pub fn start(
       next_post_id: 1,
       next_comment_id: 1,
       created_at: 0,
+      registry: registry,
     )
 
   actor.new(initial_state)
