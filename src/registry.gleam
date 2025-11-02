@@ -4,14 +4,12 @@
 import gleam/dict
 import gleam/erlang/process.{type Subject}
 import gleam/list
-import gleam/option.{None, Some}
 import gleam/otp/actor
 import gleam/string
 import subreddit_actor
 import types.{
-  type DirectMessage, type MessageId, type RegistryMessage, type RegistryState,
-  type RegistryStats, type SubredditMessage, type SubredditName, type User,
-  type UserId, DirectMessage, RegistryState, RegistryStats, User,
+  type RegistryMessage, type RegistryState, DirectMessage, RegistryState,
+  RegistryStats, User,
 }
 
 // Handle Registry messages

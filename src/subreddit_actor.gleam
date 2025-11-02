@@ -8,10 +8,8 @@ import gleam/option.{None, Some}
 import gleam/otp/actor
 import gleam/string
 import types.{
-  type Comment, type CommentId, type Post, type PostId, type Subreddit,
-  type SubredditMessage, type SubredditName, type SubredditState,
-  type SubredditStats, type UserId, Comment, Post, Subreddit, SubredditState,
-  SubredditStats,
+  type SubredditMessage, type SubredditName, type SubredditState, type UserId,
+  Comment, Post, Subreddit, SubredditState, SubredditStats,
 }
 
 // Handle Subreddit messages

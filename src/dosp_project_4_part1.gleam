@@ -8,7 +8,7 @@ pub fn main() -> Nil {
   io.println("=== Multi-Actor Distributed Architecture ===")
   io.println("")
 
-  // Start the Registry (注册中心)
+  // Start the Registry (central coordinator)
   io.println("Starting Registry Actor...")
   let registry_result = registry.start()
 
@@ -30,11 +30,13 @@ pub fn main() -> Nil {
           // Each client performs 50 actions
           zipf_param: 1.5,
           // Zipf distribution parameter (realistic social media pattern)
-          simulation_duration_ms: 30_000,
-          // 30 second simulation window
+          simulation_duration_ms: 5000,
+          // 5 second simulation window (reduced for faster testing)
+          progress_update_interval: 1000,
+          // Update progress every 1 second
         )
 
-      io.println("⚡ DISTRIBUTED ACTOR SYSTEM ⚡")
+      io.println("DISTRIBUTED ACTOR SYSTEM")
       io.println("Clients: 100 | Subreddit Actors: 20 | Total Actions: 5,000")
       io.println("Architecture: Registry + Multiple Subreddit Actors")
       io.println("")

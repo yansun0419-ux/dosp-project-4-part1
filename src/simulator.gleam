@@ -12,8 +12,8 @@ import gleam/option.{None, Some}
 import gleam/otp/actor
 import gleam/string
 import types.{
-  type Post, type RegistryMessage, type RegistryStats, type SubredditMessage,
-  type SubredditName, type UserId,
+  type Post, type RegistryMessage, type SubredditMessage, type SubredditName,
+  type UserId,
 }
 
 // Client actor messages
@@ -85,6 +85,7 @@ pub type SimulationConfig {
     num_posts_per_user: Int,
     zipf_param: Float,
     simulation_duration_ms: Int,
+    progress_update_interval: Int,
   )
 }
 
@@ -175,13 +176,16 @@ fn handle_client_message(
               // Distributed approach: Get subreddit actor first
               case get_subreddit_actor(state, subreddit_name) {
                 Ok(#(subreddit_actor, new_state)) -> {
+                  let join_reply = process.new_subject()
                   process.send(
                     subreddit_actor,
                     types.JoinSubreddit(
                       user_id: state.user_id,
-                      reply: process.new_subject(),
+                      reply: join_reply,
                     ),
                   )
+                  // Wait for join confirmation
+                  let _result = process.receive(join_reply, 100)
                   actor.continue(new_state)
                 }
                 Error(_) -> {
@@ -209,13 +213,16 @@ fn handle_client_message(
                         ClientState(..state, subreddit_cache: new_cache)
 
                       // Join this newly created subreddit
+                      let join_reply = process.new_subject()
                       process.send(
                         subreddit_actor,
                         types.JoinSubreddit(
                           user_id: state.user_id,
-                          reply: process.new_subject(),
+                          reply: join_reply,
                         ),
                       )
+                      // Wait for join confirmation
+                      let _result = process.receive(join_reply, 100)
                       actor.continue(new_state)
                     }
                     _ -> actor.continue(state)
@@ -264,15 +271,19 @@ fn handle_client_message(
               // Distributed approach: Get subreddit actor then create post
               case get_subreddit_actor(state, subreddit_name) {
                 Ok(#(subreddit_actor, new_state)) -> {
+                  let post_reply = process.new_subject()
                   process.send(
                     subreddit_actor,
                     types.CreatePost(
                       author: state.user_id,
                       title: title,
                       content: content,
-                      reply: process.new_subject(),
+                      reply: post_reply,
                     ),
                   )
+
+                  // Wait for post creation confirmation
+                  let _post_result = process.receive(post_reply, 100)
 
                   // 20% chance to add to hot posts pool
                   case int.random(100) < 20, is_repost {
@@ -343,6 +354,7 @@ fn handle_client_message(
                             <> " on action "
                             <> string.inspect(state.action_count)
 
+                          let comment_reply = process.new_subject()
                           process.send(
                             subreddit_actor,
                             types.CreateComment(
@@ -350,9 +362,12 @@ fn handle_client_message(
                               post_id: post_id,
                               parent_comment_id: None,
                               content: comment_content,
-                              reply: process.new_subject(),
+                              reply: comment_reply,
                             ),
                           )
+                          // Wait for comment creation confirmation
+                          let _comment_result =
+                            process.receive(comment_reply, 100)
                           actor.continue(new_state)
                         }
                         Error(_) -> actor.continue(state)
@@ -389,15 +404,18 @@ fn handle_client_message(
 
                       case get_subreddit_actor(state, subreddit_name) {
                         Ok(#(subreddit_actor, new_state)) -> {
+                          let vote_reply = process.new_subject()
                           process.send(
                             subreddit_actor,
                             types.VotePost(
                               post_id: post_id,
                               user_id: state.user_id,
                               is_upvote: int.random(2) == 1,
-                              reply: process.new_subject(),
+                              reply: vote_reply,
                             ),
                           )
+                          // Wait for vote confirmation (short timeout)
+                          let _vote_result = process.receive(vote_reply, 50)
                           actor.continue(new_state)
                         }
                         Error(_) -> actor.continue(state)
@@ -469,27 +487,33 @@ fn handle_client_message(
     }
 
     GoOffline -> {
+      let status_reply = process.new_subject()
       process.send(
         state.registry,
         types.SetUserOnline(
           user_id: state.user_id,
           is_online: False,
-          reply: process.new_subject(),
+          reply: status_reply,
         ),
       )
+      // Wait for status update confirmation
+      let _status_result = process.receive(status_reply, 100)
       let new_state = ClientState(..state, is_online: False)
       actor.continue(new_state)
     }
 
     GoOnline -> {
+      let status_reply = process.new_subject()
       process.send(
         state.registry,
         types.SetUserOnline(
           user_id: state.user_id,
           is_online: True,
-          reply: process.new_subject(),
+          reply: status_reply,
         ),
       )
+      // Wait for status update confirmation
+      let _status_result = process.receive(status_reply, 100)
       let new_state = ClientState(..state, is_online: True)
       actor.continue(new_state)
     }
@@ -552,8 +576,8 @@ pub fn run_simulation(
   )
   io.println("")
 
-  // Record start time for performance measurement (milliseconds)
-  // 1 = millisecond in Erlang time units
+  // Record start time for performance measurement (microseconds)
+  // 1000000 = microsecond in Erlang time units
   let start_time = monotonic_time(1_000_000)
 
   // Create subreddits with Zipf distribution
@@ -640,7 +664,7 @@ pub fn run_simulation(
                   |> list.each(fn(_) {
                     case select_by_zipf(subreddits, config.zipf_param) {
                       Ok(sub_name) -> {
-                        // 获取 subreddit actor
+                        // Get subreddit actor
                         let get_actor_reply = process.new_subject()
                         process.send(
                           registry,
@@ -744,15 +768,22 @@ pub fn run_simulation(
 
   // Give actors time to process (they're running concurrently!)
   io.println("Processing actions across distributed actors...")
+  io.println(
+    "(Waiting "
+    <> string.inspect(config.simulation_duration_ms / 1000)
+    <> " seconds for processing...)",
+  )
+
   process.sleep(config.simulation_duration_ms)
 
   io.println("")
   io.println("Simulation complete!")
   io.println("")
 
-  // Calculate elapsed time (in milliseconds)
+  // Calculate elapsed time (in microseconds, convert to milliseconds)
   let end_time = monotonic_time(1_000_000)
-  let elapsed_ms = end_time - start_time
+  let elapsed_microseconds = end_time - start_time
+  let elapsed_ms = elapsed_microseconds / 1000
   let num_actions = config.num_clients * config.num_posts_per_user
 
   // Get final statistics from registry
@@ -761,9 +792,9 @@ pub fn run_simulation(
 
   case process.receive(stats_reply, 1000) {
     Ok(registry_stats) -> {
-      io.println("=== 🎯 Performance Statistics 🎯 ===")
+      io.println("=== Performance Statistics ===")
       io.println("")
-      io.println("📊 System Metrics:")
+      io.println("System Metrics:")
       io.println(
         "  Total Users: " <> string.inspect(registry_stats.total_users),
       )
@@ -779,7 +810,7 @@ pub fn run_simulation(
       )
       io.println("")
 
-      io.println("⚡ Performance Metrics:")
+      io.println("Performance Metrics:")
       io.println("  Total Operations: " <> string.inspect(num_actions))
       io.println("  Elapsed Time: " <> string.inspect(elapsed_ms) <> " ms")
 
@@ -798,7 +829,7 @@ pub fn run_simulation(
       // Calculate theoretical maximum
       // Removed unused theoretical_max calculation
       io.println("")
-      io.println("🚀 Distributed System Efficiency:")
+      io.println("Distributed System Efficiency:")
       io.println(
         "  Concurrent Actors: "
         <> string.inspect(registry_stats.total_subreddits + 1),
