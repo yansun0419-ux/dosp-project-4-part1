@@ -41,6 +41,8 @@ pub type ClientState {
     action_count: Int,
     is_online: Bool,
     known_posts: List(String),
+    known_comments: List(String),
+    // Track comment IDs for hierarchical replies
     hot_posts: List(HotPost),
     subreddit_cache: Dict(SubredditName, Subject(SubredditMessage)),
     available_subreddits: List(SubredditName),
@@ -178,8 +180,8 @@ fn handle_client_message(
           let action = int.random(100)
 
           case action {
-            // 25% - Create/join subreddit
-            n if n < 25 -> {
+            // 20% - Create/join subreddit
+            n if n < 20 -> {
               let subreddit_name = "sub_" <> string.inspect(int.random(50))
 
               // Distributed approach: Get subreddit actor first
@@ -239,8 +241,8 @@ fn handle_client_message(
                 }
               }
             }
-            // 35% - Create post or re-post
-            n if n < 60 -> {
+            // 30% - Create post or re-post
+            n if n < 50 -> {
               // Use Zipf distribution to select subreddit (popular subs get more posts)
               let subreddit_name = case
                 select_by_zipf(state.available_subreddits, state.zipf_param)
@@ -321,8 +323,8 @@ fn handle_client_message(
                 }
               }
             }
-            // 15% - Create comment on a post
-            n if n < 75 -> {
+            // 13% - Create comment on a post (with hierarchical support)
+            n if n < 63 -> {
               case list.length(state.known_posts) {
                 0 -> {
                   // No known posts, skip for now
@@ -353,21 +355,60 @@ fn handle_client_message(
                             <> " on action "
                             <> string.inspect(state.action_count)
 
+                          // 30% chance to reply to an existing comment (hierarchical)
+                          let parent_comment_id = case
+                            int.random(100) < 30 && state.known_comments != []
+                          {
+                            True -> {
+                              case
+                                list.drop(
+                                  state.known_comments,
+                                  int.random(list.length(state.known_comments)),
+                                )
+                                |> list.first
+                              {
+                                Ok(comment_id) -> Some(comment_id)
+                                Error(_) -> None
+                              }
+                            }
+                            False -> None
+                          }
+
                           let comment_reply = process.new_subject()
                           process.send(
                             subreddit_actor,
                             types.CreateComment(
                               author: state.user_id,
                               post_id: post_id,
-                              parent_comment_id: None,
+                              parent_comment_id: parent_comment_id,
                               content: comment_content,
                               reply: comment_reply,
                             ),
                           )
                           // Wait for comment creation confirmation
-                          let _comment_result =
-                            process.receive(comment_reply, 100)
-                          actor.continue(new_state)
+                          case process.receive(comment_reply, 100) {
+                            Ok(Ok(comment_id)) -> {
+                              // Store this comment ID for potential replies
+                              let updated_comments = [
+                                comment_id,
+                                ..new_state.known_comments
+                              ]
+                              // Keep only latest 50 comments
+                              let limited_comments = case
+                                list.length(updated_comments)
+                              {
+                                n if n > 50 -> list.take(updated_comments, 50)
+                                _ -> updated_comments
+                              }
+                              actor.continue(
+                                ClientState(
+                                  ..new_state,
+                                  known_comments: limited_comments,
+                                ),
+                              )
+                            }
+                            _ -> actor.continue(new_state)
+                          }
                         }
                         Error(_) -> actor.continue(state)
                       }
@@ -377,8 +418,8 @@ fn handle_client_message(
                 }
               }
             }
-            // 10% - Vote on post
-            n if n < 85 -> {
+            // 10% - Vote on post  
+            n if n < 73 -> {
               case list.length(state.known_posts) {
                 0 -> {
                   // No known posts, skip for now
@@ -424,7 +465,28 @@ fn handle_client_message(
                 }
               }
             }
-            // 15% - Get feed to update known posts
+            // 10% - Send direct message
+            n if n < 83 -> {
+              // Send a direct message to a random user
+              let target_user = "user_" <> string.inspect(int.random(100) + 1)
+              let message_content =
+                "Hello from " <> state.username <> "! Random message."
+
+              let dm_reply = process.new_subject()
+              process.send(
+                state.registry,
+                types.SendDirectMessage(
+                  from: state.user_id,
+                  to: target_user,
+                  content: message_content,
+                  reply: dm_reply,
+                ),
+              )
+              // Wait for confirmation
+              let _dm_result = process.receive(dm_reply, 100)
+              actor.continue(state)
+            }
+            // 17% - Get feed to update known posts
             _ -> {
               // Use Zipf to select subreddit
               let subreddit_name = case
@@ -543,6 +605,7 @@ pub fn start_client(
       action_count: 0,
       is_online: True,
       known_posts: [],
+      known_comments: [],
       hot_posts: [],
       subreddit_cache: dict.new(),
       available_subreddits: available_subreddits,
