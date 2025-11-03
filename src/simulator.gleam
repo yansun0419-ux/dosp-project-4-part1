@@ -787,7 +787,7 @@ pub fn run_simulation(
 
   // Query all subreddit actors to get actual completed operations
   io.println("Collecting actual operation counts from all actors...")
-  
+
   let subreddit_stats_list =
     subreddits
     |> list.filter_map(fn(sub_name) {
@@ -796,7 +796,7 @@ pub fn run_simulation(
         registry,
         types.GetSubredditActor(name: sub_name, reply: get_actor_reply),
       )
-      
+
       case process.receive(get_actor_reply, 1000) {
         Ok(Ok(subreddit_actor)) -> {
           let stats_reply = process.new_subject()
@@ -804,7 +804,7 @@ pub fn run_simulation(
             subreddit_actor,
             types.GetSubredditStats(reply: stats_reply),
           )
-          
+
           case process.receive(stats_reply, 1000) {
             Ok(stats) -> Ok(stats)
             Error(_) -> Error(Nil)
@@ -813,16 +813,16 @@ pub fn run_simulation(
         _ -> Error(Nil)
       }
     })
-  
+
   // Calculate actual completed operations
   let actual_posts =
     subreddit_stats_list
     |> list.fold(0, fn(acc, stats) { acc + stats.total_posts })
-  
+
   let actual_comments =
     subreddit_stats_list
     |> list.fold(0, fn(acc, stats) { acc + stats.total_comments })
-  
+
   let actual_operations = actual_posts + actual_comments
   let target_operations = config.num_clients * config.num_posts_per_user
 
@@ -832,7 +832,6 @@ pub fn run_simulation(
 
   case process.receive(stats_reply, 1000) {
     Ok(registry_stats) -> {
-      
       io.println("=== Performance Statistics ===")
       io.println("")
       io.println("System Metrics:")
@@ -852,13 +851,23 @@ pub fn run_simulation(
       io.println("")
 
       io.println("Performance Metrics:")
-      io.println("  Target Operations Sent: " <> string.inspect(target_operations))
-      io.println("  Actual Operations Completed: " <> string.inspect(actual_operations))
+      io.println(
+        "  Target Operations Sent: " <> string.inspect(target_operations),
+      )
+      io.println(
+        "  Actual Operations Completed: " <> string.inspect(actual_operations),
+      )
       io.println("    - Posts Created: " <> string.inspect(actual_posts))
       io.println("    - Comments Created: " <> string.inspect(actual_comments))
-      io.println("  Completion Rate: " <> float.to_string(
-        int.to_float(actual_operations) /. int.to_float(target_operations) *. 100.0,
-      ) <> "%")
+      io.println(
+        "  Completion Rate: "
+        <> float.to_string(
+          int.to_float(actual_operations)
+          /. int.to_float(target_operations)
+          *. 100.0,
+        )
+        <> "%",
+      )
       io.println("  Elapsed Time: " <> string.inspect(elapsed_ms) <> " ms")
 
       let actual_duration = case elapsed_ms {
@@ -867,11 +876,17 @@ pub fn run_simulation(
       }
 
       let ops_per_second =
-        int.to_float(actual_operations) /. int.to_float(actual_duration) *. 1000.0
+        int.to_float(actual_operations)
+        /. int.to_float(actual_duration)
+        *. 1000.0
       let ops_per_minute = ops_per_second *. 60.0
 
-      io.println("  Operations/second (actual): " <> float.to_string(ops_per_second))
-      io.println("  Operations/minute (actual): " <> float.to_string(ops_per_minute))
+      io.println(
+        "  Operations/second (actual): " <> float.to_string(ops_per_second),
+      )
+      io.println(
+        "  Operations/minute (actual): " <> float.to_string(ops_per_minute),
+      )
 
       // Calculate theoretical maximum
       // Removed unused theoretical_max calculation
@@ -898,8 +913,7 @@ pub fn run_simulation(
 
   let ops_per_second = case elapsed_ms {
     0 -> 0.0
-    _ ->
-      int.to_float(actual_operations) /. int.to_float(elapsed_ms) *. 1000.0
+    _ -> int.to_float(actual_operations) /. int.to_float(elapsed_ms) *. 1000.0
   }
 
   SimulationStats(
