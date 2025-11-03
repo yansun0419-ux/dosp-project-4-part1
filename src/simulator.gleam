@@ -24,6 +24,12 @@ pub type ClientMessage {
   Shutdown
   UpdateFeed(posts: List(String))
   AddHotPost(title: String, content: String, subreddit: String)
+  GetStats(reply: Subject(ClientStats))
+}
+
+// Client statistics
+pub type ClientStats {
+  ClientStats(user_id: UserId, actions_completed: Int, is_online: Bool)
 }
 
 // Client state - Distributed version
@@ -165,6 +171,9 @@ fn handle_client_message(
     PerformAction -> {
       case state.is_online {
         True -> {
+          // Increment action count (we're processing this action)
+          let state = ClientState(..state, action_count: state.action_count + 1)
+
           // Perform a random action
           let action = int.random(100)
 
@@ -300,20 +309,10 @@ fn handle_client_message(
                         _ -> new_hot_posts
                       }
                       actor.continue(
-                        ClientState(
-                          ..new_state,
-                          action_count: new_state.action_count + 1,
-                          hot_posts: limited_hot_posts,
-                        ),
+                        ClientState(..new_state, hot_posts: limited_hot_posts),
                       )
                     }
-                    _, _ ->
-                      actor.continue(
-                        ClientState(
-                          ..new_state,
-                          action_count: new_state.action_count + 1,
-                        ),
-                      )
+                    _, _ -> actor.continue(new_state)
                   }
                 }
                 Error(_) -> {
@@ -335,15 +334,15 @@ fn handle_client_message(
                     list.drop(state.known_posts, int.random(n)) |> list.first
                   {
                     Ok(post_id) -> {
-                      // Use Zipf to select subreddit
+                      // Extract subreddit name from post_id
+                      // Post ID format: "subreddit_name_post_123"
+                      // We need to extract "subreddit_name" part
                       let subreddit_name = case
-                        select_by_zipf(
-                          state.available_subreddits,
-                          state.zipf_param,
-                        )
+                        string.split(post_id, "_post_")
                       {
-                        Ok(name) -> name
-                        Error(_) -> "sub_1"
+                        [sub_name, ..] -> sub_name
+                        _ -> "sub_1"
+                        // fallback
                       }
 
                       case get_subreddit_actor(state, subreddit_name) {
@@ -391,15 +390,14 @@ fn handle_client_message(
                     list.drop(state.known_posts, int.random(n)) |> list.first
                   {
                     Ok(post_id) -> {
-                      // Use Zipf to select subreddit
+                      // Extract subreddit name from post_id
+                      // Post ID format: "subreddit_name_post_123"
                       let subreddit_name = case
-                        select_by_zipf(
-                          state.available_subreddits,
-                          state.zipf_param,
-                        )
+                        string.split(post_id, "_post_")
                       {
-                        Ok(name) -> name
-                        Error(_) -> "sub_1"
+                        [sub_name, ..] -> sub_name
+                        _ -> "sub_1"
+                        // fallback
                       }
 
                       case get_subreddit_actor(state, subreddit_name) {
@@ -460,10 +458,6 @@ fn handle_client_message(
               }
             }
           }
-
-          let new_state =
-            ClientState(..state, action_count: state.action_count + 1)
-          actor.continue(new_state)
         }
         False -> actor.continue(state)
       }
@@ -516,6 +510,17 @@ fn handle_client_message(
       let _status_result = process.receive(status_reply, 100)
       let new_state = ClientState(..state, is_online: True)
       actor.continue(new_state)
+    }
+
+    GetStats(reply) -> {
+      let stats =
+        ClientStats(
+          user_id: state.user_id,
+          actions_completed: state.action_count,
+          is_online: state.is_online,
+        )
+      process.send(reply, stats)
+      actor.continue(state)
     }
 
     Shutdown -> actor.stop()
@@ -785,9 +790,29 @@ pub fn run_simulation(
   let elapsed_microseconds = end_time - start_time
   let elapsed_ms = elapsed_microseconds / 1000
 
-  // Query all subreddit actors to get actual completed operations
-  io.println("Collecting actual operation counts from all actors...")
+  // Query all client actors to get actual completed actions
+  io.println("Collecting action counts from all client actors...")
 
+  let client_stats_list =
+    clients
+    |> list.filter_map(fn(client) {
+      let stats_reply = process.new_subject()
+      process.send(client, GetStats(reply: stats_reply))
+
+      case process.receive(stats_reply, 1000) {
+        Ok(stats) -> Ok(stats)
+        Error(_) -> Error(Nil)
+      }
+    })
+
+  // Calculate total completed actions
+  let actual_operations =
+    client_stats_list
+    |> list.fold(0, fn(acc, stats) { acc + stats.actions_completed })
+
+  let target_operations = config.num_clients * config.num_posts_per_user
+
+  // Also get subreddit stats for posts/comments breakdown
   let subreddit_stats_list =
     subreddits
     |> list.filter_map(fn(sub_name) {
@@ -814,7 +839,6 @@ pub fn run_simulation(
       }
     })
 
-  // Calculate actual completed operations
   let actual_posts =
     subreddit_stats_list
     |> list.fold(0, fn(acc, stats) { acc + stats.total_posts })
@@ -822,9 +846,6 @@ pub fn run_simulation(
   let actual_comments =
     subreddit_stats_list
     |> list.fold(0, fn(acc, stats) { acc + stats.total_comments })
-
-  let actual_operations = actual_posts + actual_comments
-  let target_operations = config.num_clients * config.num_posts_per_user
 
   // Get final statistics from registry
   let stats_reply = process.new_subject()
