@@ -241,8 +241,8 @@ fn handle_client_message(
                 }
               }
             }
-            // 30% - Create post or re-post
-            n if n < 50 -> {
+            // 27% - Create post or re-post
+            n if n < 47 -> {
               // Use Zipf distribution to select subreddit (popular subs get more posts)
               let subreddit_name = case
                 select_by_zipf(state.available_subreddits, state.zipf_param)
@@ -418,55 +418,96 @@ fn handle_client_message(
                 }
               }
             }
-            // 10% - Vote on post  
+            // 10% - Vote on post or comment  
             n if n < 73 -> {
-              case list.length(state.known_posts) {
+              // 50% chance to vote on post, 50% chance to vote on comment
+              case int.random(2) {
                 0 -> {
-                  // No known posts, skip for now
-                  actor.continue(state)
-                }
-                n -> {
-                  // Vote on known post
-                  case
-                    list.drop(state.known_posts, int.random(n)) |> list.first
-                  {
-                    Ok(post_id) -> {
-                      // Extract subreddit name from post_id
-                      // Post ID format: "subreddit_name_post_123"
-                      let subreddit_name = case
-                        string.split(post_id, "_post_")
+                  // Vote on post
+                  case list.length(state.known_posts) {
+                    0 -> actor.continue(state)
+                    n -> {
+                      case
+                        list.drop(state.known_posts, int.random(n))
+                        |> list.first
                       {
-                        [sub_name, ..] -> sub_name
-                        _ -> "sub_1"
-                        // fallback
-                      }
+                        Ok(post_id) -> {
+                          // Extract subreddit name from post_id
+                          let subreddit_name = case
+                            string.split(post_id, "_post_")
+                          {
+                            [sub_name, ..] -> sub_name
+                            _ -> "sub_1"
+                          }
 
-                      case get_subreddit_actor(state, subreddit_name) {
-                        Ok(#(subreddit_actor, new_state)) -> {
-                          let vote_reply = process.new_subject()
-                          process.send(
-                            subreddit_actor,
-                            types.VotePost(
-                              post_id: post_id,
-                              user_id: state.user_id,
-                              is_upvote: int.random(2) == 1,
-                              reply: vote_reply,
-                            ),
-                          )
-                          // Wait for vote confirmation (short timeout)
-                          let _vote_result = process.receive(vote_reply, 50)
-                          actor.continue(new_state)
+                          case get_subreddit_actor(state, subreddit_name) {
+                            Ok(#(subreddit_actor, new_state)) -> {
+                              let vote_reply = process.new_subject()
+                              process.send(
+                                subreddit_actor,
+                                types.VotePost(
+                                  post_id: post_id,
+                                  user_id: state.user_id,
+                                  is_upvote: int.random(2) == 1,
+                                  reply: vote_reply,
+                                ),
+                              )
+                              let _vote_result = process.receive(vote_reply, 50)
+                              actor.continue(new_state)
+                            }
+                            Error(_) -> actor.continue(state)
+                          }
                         }
                         Error(_) -> actor.continue(state)
                       }
                     }
-                    Error(_) -> actor.continue(state)
+                  }
+                }
+                _ -> {
+                  // Vote on comment
+                  case list.length(state.known_comments) {
+                    0 -> actor.continue(state)
+                    n -> {
+                      case
+                        list.drop(state.known_comments, int.random(n))
+                        |> list.first
+                      {
+                        Ok(comment_id) -> {
+                          // Extract subreddit name from comment_id
+                          let subreddit_name = case
+                            string.split(comment_id, "_comment_")
+                          {
+                            [sub_name, ..] -> sub_name
+                            _ -> "sub_1"
+                          }
+
+                          case get_subreddit_actor(state, subreddit_name) {
+                            Ok(#(subreddit_actor, new_state)) -> {
+                              let vote_reply = process.new_subject()
+                              process.send(
+                                subreddit_actor,
+                                types.VoteComment(
+                                  comment_id: comment_id,
+                                  user_id: state.user_id,
+                                  is_upvote: int.random(2) == 1,
+                                  reply: vote_reply,
+                                ),
+                              )
+                              let _vote_result = process.receive(vote_reply, 50)
+                              actor.continue(new_state)
+                            }
+                            Error(_) -> actor.continue(state)
+                          }
+                        }
+                        Error(_) -> actor.continue(state)
+                      }
+                    }
                   }
                 }
               }
             }
-            // 10% - Send direct message
-            n if n < 83 -> {
+            // 8% - Send direct message
+            n if n < 78 -> {
               // Send a direct message to a random user
               let target_user = "user_" <> string.inspect(int.random(100) + 1)
               let message_content =
@@ -485,6 +526,92 @@ fn handle_client_message(
               // Wait for confirmation
               let _dm_result = process.receive(dm_reply, 100)
               actor.continue(state)
+            }
+            // 5% - Get direct messages OR Leave subreddit
+            n if n < 83 -> {
+              // Alternate between getting DMs and leaving subreddits
+              case int.random(2) {
+                0 -> {
+                  // Get direct messages
+                  let get_dm_reply = process.new_subject()
+                  process.send(
+                    state.registry,
+                    types.GetDirectMessages(
+                      user_id: state.user_id,
+                      reply: get_dm_reply,
+                    ),
+                  )
+                  // Wait for messages and possibly reply to one
+                  case process.receive(get_dm_reply, 100) {
+                    Ok(Ok(messages)) -> {
+                      // If we have messages, randomly decide if we should reply (30% chance)
+                      let msg_count = list.length(messages)
+                      let should_reply = int.random(100) < 30
+                      case msg_count > 0 && should_reply {
+                        True -> {
+                          // Select random message to reply to
+                          case
+                            list.drop(messages, int.random(msg_count))
+                            |> list.first
+                          {
+                            Ok(dm) -> {
+                              let reply_reply = process.new_subject()
+                              process.send(
+                                state.registry,
+                                types.ReplyToDirectMessage(
+                                  message_id: dm.id,
+                                  from: state.user_id,
+                                  content: "Re: " <> dm.content,
+                                  reply: reply_reply,
+                                ),
+                              )
+                              // Wait for confirmation
+                              let _reply_result =
+                                process.receive(reply_reply, 100)
+                              actor.continue(state)
+                            }
+                            Error(_) -> actor.continue(state)
+                          }
+                        }
+                        False -> actor.continue(state)
+                      }
+                    }
+                    _ -> actor.continue(state)
+                  }
+                }
+                _ -> {
+                  // Leave a random subreddit
+                  case list.length(state.available_subreddits) {
+                    0 -> actor.continue(state)
+                    n -> {
+                      case
+                        list.drop(state.available_subreddits, int.random(n))
+                        |> list.first
+                      {
+                        Ok(sub_name) -> {
+                          case get_subreddit_actor(state, sub_name) {
+                            Ok(#(subreddit_actor, new_state)) -> {
+                              let leave_reply = process.new_subject()
+                              process.send(
+                                subreddit_actor,
+                                types.LeaveSubreddit(
+                                  user_id: state.user_id,
+                                  reply: leave_reply,
+                                ),
+                              )
+                              let _leave_result =
+                                process.receive(leave_reply, 100)
+                              actor.continue(new_state)
+                            }
+                            Error(_) -> actor.continue(state)
+                          }
+                        }
+                        Error(_) -> actor.continue(state)
+                      }
+                    }
+                  }
+                }
+              }
             }
             // 17% - Get feed to update known posts
             _ -> {
