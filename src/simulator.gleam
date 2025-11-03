@@ -46,6 +46,8 @@ pub type ClientState {
     hot_posts: List(HotPost),
     subreddit_cache: Dict(SubredditName, Subject(SubredditMessage)),
     available_subreddits: List(SubredditName),
+    all_user_ids: List(UserId),
+    // Track all registered user IDs for DM targeting
     zipf_param: Float,
   )
 }
@@ -182,48 +184,14 @@ fn handle_client_message(
           case action {
             // 20% - Create/join subreddit
             n if n < 20 -> {
-              let subreddit_name = "sub_" <> string.inspect(int.random(50))
-
-              // Distributed approach: Get subreddit actor first
-              case get_subreddit_actor(state, subreddit_name) {
-                Ok(#(subreddit_actor, new_state)) -> {
-                  let join_reply = process.new_subject()
-                  process.send(
-                    subreddit_actor,
-                    types.JoinSubreddit(
-                      user_id: state.user_id,
-                      reply: join_reply,
-                    ),
-                  )
-                  // Wait for join confirmation
-                  let _result = process.receive(join_reply, 100)
-                  actor.continue(new_state)
-                }
-                Error(_) -> {
-                  // Subreddit doesn't exist, create it first
-                  let reply = process.new_subject()
-                  process.send(
-                    state.registry,
-                    types.CreateSubreddit(
-                      name: subreddit_name,
-                      creator: state.user_id,
-                      registry_subject: state.registry,
-                      reply: reply,
-                    ),
-                  )
-                  // Wait for creation result, then add to cache
-                  case process.receive(reply, 1000) {
-                    Ok(Ok(subreddit_actor)) -> {
-                      let new_cache =
-                        dict.insert(
-                          state.subreddit_cache,
-                          subreddit_name,
-                          subreddit_actor,
-                        )
-                      let new_state =
-                        ClientState(..state, subreddit_cache: new_cache)
-
-                      // Join this newly created subreddit
+              // Select from available subreddits using Zipf
+              case
+                select_by_zipf(state.available_subreddits, state.zipf_param)
+              {
+                Ok(subreddit_name) -> {
+                  // Distributed approach: Get subreddit actor first
+                  case get_subreddit_actor(state, subreddit_name) {
+                    Ok(#(subreddit_actor, new_state)) -> {
                       let join_reply = process.new_subject()
                       process.send(
                         subreddit_actor,
@@ -236,9 +204,49 @@ fn handle_client_message(
                       let _result = process.receive(join_reply, 100)
                       actor.continue(new_state)
                     }
-                    _ -> actor.continue(state)
+                    Error(_) -> {
+                      // Subreddit doesn't exist, create it first
+                      let reply = process.new_subject()
+                      process.send(
+                        state.registry,
+                        types.CreateSubreddit(
+                          name: subreddit_name,
+                          creator: state.user_id,
+                          registry_subject: state.registry,
+                          reply: reply,
+                        ),
+                      )
+                      // Wait for creation result, then add to cache
+                      case process.receive(reply, 1000) {
+                        Ok(Ok(subreddit_actor)) -> {
+                          let new_cache =
+                            dict.insert(
+                              state.subreddit_cache,
+                              subreddit_name,
+                              subreddit_actor,
+                            )
+                          let new_state =
+                            ClientState(..state, subreddit_cache: new_cache)
+
+                          // Join this newly created subreddit
+                          let join_reply = process.new_subject()
+                          process.send(
+                            subreddit_actor,
+                            types.JoinSubreddit(
+                              user_id: state.user_id,
+                              reply: join_reply,
+                            ),
+                          )
+                          // Wait for join confirmation
+                          let _result = process.receive(join_reply, 100)
+                          actor.continue(new_state)
+                        }
+                        _ -> actor.continue(state)
+                      }
+                    }
                   }
                 }
+                Error(_) -> actor.continue(state)
               }
             }
             // 27% - Create post or re-post
@@ -508,24 +516,43 @@ fn handle_client_message(
             }
             // 8% - Send direct message
             n if n < 78 -> {
-              // Send a direct message to a random user
-              let target_user = "user_" <> string.inspect(int.random(100) + 1)
-              let message_content =
-                "Hello from " <> state.username <> "! Random message."
+              // Send a direct message to a random user from the list of registered users
+              case list.length(state.all_user_ids) {
+                0 -> actor.continue(state)
+                n -> {
+                  case
+                    list.drop(state.all_user_ids, int.random(n)) |> list.first
+                  {
+                    Ok(target_user) -> {
+                      // Don't send to self
+                      case target_user == state.user_id {
+                        True -> actor.continue(state)
+                        False -> {
+                          let message_content =
+                            "Hello from "
+                            <> state.username
+                            <> "! Random message."
 
-              let dm_reply = process.new_subject()
-              process.send(
-                state.registry,
-                types.SendDirectMessage(
-                  from: state.user_id,
-                  to: target_user,
-                  content: message_content,
-                  reply: dm_reply,
-                ),
-              )
-              // Wait for confirmation
-              let _dm_result = process.receive(dm_reply, 100)
-              actor.continue(state)
+                          let dm_reply = process.new_subject()
+                          process.send(
+                            state.registry,
+                            types.SendDirectMessage(
+                              from: state.user_id,
+                              to: target_user,
+                              content: message_content,
+                              reply: dm_reply,
+                            ),
+                          )
+                          // Wait for confirmation
+                          let _dm_result = process.receive(dm_reply, 100)
+                          actor.continue(state)
+                        }
+                      }
+                    }
+                    Error(_) -> actor.continue(state)
+                  }
+                }
+              }
             }
             // 5% - Get direct messages OR Leave subreddit
             n if n < 83 -> {
@@ -722,6 +749,7 @@ pub fn start_client(
   user_id: UserId,
   registry: Subject(RegistryMessage),
   available_subreddits: List(SubredditName),
+  all_user_ids: List(UserId),
   zipf_param: Float,
 ) -> Result(actor.Started(Subject(ClientMessage)), actor.StartError) {
   let state =
@@ -736,6 +764,7 @@ pub fn start_client(
       hot_posts: [],
       subreddit_cache: dict.new(),
       available_subreddits: available_subreddits,
+      all_user_ids: all_user_ids,
       zipf_param: zipf_param,
     )
 
@@ -817,11 +846,11 @@ pub fn run_simulation(
   )
   io.println("")
 
-  // Register users and create clients
-  io.println("Registering users and starting clients...")
-  let clients =
+  // Step 1: Register all users and collect their user IDs
+  io.println("Registering users...")
+  let user_data =
     list.range(1, config.num_clients)
-    |> list.map(fn(i) {
+    |> list.filter_map(fn(i) {
       let username = "user" <> string.inspect(i)
 
       // Register user
@@ -832,78 +861,79 @@ pub fn run_simulation(
       )
 
       case process.receive(register_reply, 1000) {
-        Ok(result) -> {
-          case result {
-            Ok(user_id) -> {
-              // Start client actor
-              case
-                start_client(
-                  username,
-                  user_id,
-                  registry,
-                  subreddits,
-                  config.zipf_param,
-                )
-              {
-                Ok(started) -> {
-                  // Join some subreddits based on Zipf distribution
-                  let num_subs_to_join = case i {
-                    n if n <= 10 -> 10
-                    // Top users join many subs
-                    n if n <= 50 -> 5
-                    n if n <= 200 -> 2
-                    _ -> 1
-                  }
-
-                  list.range(1, num_subs_to_join)
-                  |> list.each(fn(_) {
-                    case select_by_zipf(subreddits, config.zipf_param) {
-                      Ok(sub_name) -> {
-                        // Get subreddit actor
-                        let get_actor_reply = process.new_subject()
-                        process.send(
-                          registry,
-                          types.GetSubredditActor(
-                            name: sub_name,
-                            reply: get_actor_reply,
-                          ),
-                        )
-
-                        case process.receive(get_actor_reply, 1000) {
-                          Ok(Ok(subreddit_actor)) -> {
-                            let join_reply = process.new_subject()
-                            process.send(
-                              subreddit_actor,
-                              types.JoinSubreddit(
-                                user_id: user_id,
-                                reply: join_reply,
-                              ),
-                            )
-                            let _result = process.receive(join_reply, 1000)
-                            Nil
-                          }
-                          _ -> Nil
-                        }
-                      }
-                      Error(_) -> Nil
-                    }
-                  })
-
-                  Some(started.data)
-                }
-                Error(_) -> None
-              }
-            }
-            Error(_) -> None
-          }
-        }
-        Error(_) -> None
+        Ok(Ok(user_id)) -> Ok(#(i, username, user_id))
+        _ -> Error(Nil)
       }
     })
-    |> list.filter_map(fn(opt) {
-      case opt {
-        Some(client) -> Ok(client)
-        None -> Error(Nil)
+
+  let all_user_ids = list.map(user_data, fn(data) { data.2 })
+
+  io.println(
+    "Registered " <> string.inspect(list.length(all_user_ids)) <> " users",
+  )
+
+  // Step 2: Create clients with the complete list of user IDs
+  io.println("Starting clients...")
+  let clients =
+    user_data
+    |> list.filter_map(fn(data) {
+      let #(i, username, user_id) = data
+
+      // Start client actor
+      case
+        start_client(
+          username,
+          user_id,
+          registry,
+          subreddits,
+          all_user_ids,
+          config.zipf_param,
+        )
+      {
+        Ok(started) -> {
+          // Join some subreddits based on Zipf distribution
+          let num_subs_to_join = case i {
+            n if n <= 10 -> 10
+            // Top users join many subs
+            n if n <= 50 -> 5
+            n if n <= 200 -> 2
+            _ -> 1
+          }
+
+          list.range(1, num_subs_to_join)
+          |> list.each(fn(_) {
+            case select_by_zipf(subreddits, config.zipf_param) {
+              Ok(sub_name) -> {
+                // Get subreddit actor
+                let get_actor_reply = process.new_subject()
+                process.send(
+                  registry,
+                  types.GetSubredditActor(
+                    name: sub_name,
+                    reply: get_actor_reply,
+                  ),
+                )
+
+                case process.receive(get_actor_reply, 1000) {
+                  Ok(Ok(subreddit_actor)) -> {
+                    let join_reply = process.new_subject()
+                    process.send(
+                      subreddit_actor,
+                      types.JoinSubreddit(user_id: user_id, reply: join_reply),
+                    )
+                    let _result = process.receive(join_reply, 1000)
+                    Nil
+                  }
+                  _ -> Nil
+                }
+              }
+              Error(_) -> Nil
+            }
+          })
+
+          Ok(started.data)
+        }
+        Error(_) -> Error(Nil)
       }
     })
 
