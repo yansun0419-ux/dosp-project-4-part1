@@ -26,12 +26,12 @@ pub fn main() -> Nil {
           // 100 concurrent client actors
           num_subreddits: 20,
           // 20 subreddit actors (fully distributed)
-          num_posts_per_user: 50,
-          // Each client performs 50 actions
+          num_posts_per_user: 300,
+          // Each client performs 300 actions
           zipf_param: 1.5,
           // Zipf distribution parameter (realistic social media pattern)
-          simulation_duration_ms: 5000,
-          // 5 second simulation window (reduced for faster testing)
+          simulation_duration_ms: 30_000,
+          // 30 second simulation window
           progress_update_interval: 1000,
           // Update progress every 1 second
         )
@@ -46,9 +46,6 @@ pub fn main() -> Nil {
 
       io.println("")
       io.println("=== Simulation Complete ===")
-      io.println(
-        "Note: This is a TRUE distributed system with multiple concurrent Actors!",
-      )
     }
     Error(err) -> {
       io.println("Failed to start registry: " <> string.inspect(err))
